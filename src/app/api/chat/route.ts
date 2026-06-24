@@ -243,6 +243,17 @@ export async function POST(req: NextRequest) {
   } catch (error: unknown) {
     console.error("[api/chat] error:", error);
     const message = error instanceof Error ? error.message : "Internal Server Error";
+    // Detect z.ai rate-limit / quota exhaustion and return 429 so the frontend
+    // can surface a clear "quota exhausted" message instead of a generic error.
+    const isRateLimited = message.includes("429") || message.includes("Too many requests");
+    if (isRateLimited) {
+      return NextResponse.json(
+        {
+          error: "[QUOTA_EXHAUSTED] z.ai 每日调用额度已用尽 (HTTP 429 Too many requests)。请稍后重试或等待额度重置。",
+        },
+        { status: 429 }
+      );
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

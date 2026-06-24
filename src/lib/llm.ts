@@ -193,6 +193,8 @@ const QUOTA_EXHAUSTED_MARKER = "[QUOTA_EXHAUSTED]";
 
 function isQuotaExhaustedError(status: number, errorText: string): boolean {
   if (status === 402) return true;
+  // z.ai daily quota exhaustion (429 + QUOTA_EXHAUSTED marker from our /api/chat route)
+  if (status === 429 && errorText.includes("[QUOTA_EXHAUSTED]")) return true;
   const lower = errorText.toLowerCase();
   return (
     lower.includes("insufficient") ||
@@ -256,8 +258,31 @@ async function fetchWithRetry(
 
       if (response.ok) return response;
 
+      // For 429, check if it's a hard daily-quota exhaustion (marked by our
+      // /api/chat route). If so, don't retry — return immediately so the
+      // frontend can show a clear "quota exhausted" message.
+      if (response.status === 429) {
+        const bodyText = await response.text().catch(() => "");
+        const isDailyQuotaExhausted =
+          bodyText.includes("[QUOTA_EXHAUSTED]") ||
+          bodyText.includes("daily") ||
+          bodyText.includes("额度");
+        if (isDailyQuotaExhausted) {
+          // Re-wrap so formatApiError can detect the QUOTA marker.
+          return new Response(bodyText, {
+            status: 429,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Put the body back for the non-quota 429 retry path.
+        lastResponse = new Response(bodyText, {
+          status: 429,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
       if (!RETRYABLE_STATUS.has(response.status) || attempt === maxAttempts) {
-        return response;
+        return lastResponse;
       }
 
       const retryAfterMs = parseRetryAfterMs(response);

@@ -715,15 +715,17 @@ export async function generateCharacters(
     } catch (error) {
       lastError = error;
       console.error(`[character-gen] Attempt ${attempt + 1} failed:`, error);
-      
+
       const errorMsg = String(error);
-      const isQuotaError = errorMsg.includes("[QUOTA_EXHAUSTED]") || 
-                          errorMsg.includes("402") || 
+      const isQuotaError = errorMsg.includes("[QUOTA_EXHAUSTED]") ||
+                          errorMsg.includes("402") ||
                           errorMsg.includes("insufficient") ||
                           errorMsg.includes("余额");
-      
-      if (isCustomKeyEnabled() && isQuotaError) {
-        console.error("[character-gen] Custom key quota exhausted, aborting retry");
+
+      // Quota exhaustion is not recoverable by retrying — abort immediately
+      // (applies to both built-in z.ai quota and custom-key quota).
+      if (isQuotaError) {
+        console.error("[character-gen] Quota exhausted, aborting retry");
         throw error;
       }
       

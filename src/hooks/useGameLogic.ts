@@ -1703,10 +1703,11 @@ export function useGameLogic() {
       }
     } catch (error) {
       const msg = String(error);
-      if (isQuotaExhaustedMessage(msg)) {
-        toast.error(t("gameLogicMessages.quotaExhausted.title"), {
-          description: t("gameLogicMessages.quotaExhausted.description"),
-          duration: 10000,
+      const isQuota = isQuotaExhaustedMessage(msg);
+      if (isQuota) {
+        toast.error("AI 调用额度已用尽", {
+          description: "z.ai 每日免费调用额度已耗尽，请稍后重试（通常次日重置）。",
+          duration: 15000,
         });
       } else if (msg.includes("ZenMux API error: 401") || msg.includes(" 401")) {
         toast.error(t("gameLogicMessages.zenmux401"));

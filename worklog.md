@@ -515,3 +515,29 @@ Stage Summary:
 - Model catalog reduced to 2 z.ai models (glm-4.6, glm-4.5-flash); provider field = "zai".
 - Landing page is now a focused game start screen (name + player count + difficulty + role + Start Game button) in dark amber/red retro theme, fully responsive, i18n-aware (zh/en).
 - NOTE: z.ai API is currently returning HTTP 429 (account daily quota exhausted from testing). The integration is correct and will work once quota resets. withRetry() handles transient 429s with exponential backoff.
+
+---
+Task ID: 3
+Agent: main (Z.ai Code)
+Task: Fix "stuck on players entering" — root cause + clear quota error UX
+
+Work Log:
+- Inspected dev.log: every /api/chat call returned 500 → z.ai 429 "Too many requests".
+- Ran a raw fetch probe against z.ai (with proper X-Token header) and read response headers:
+    x-ratelimit-user-daily-remaining: 0   ← daily quota EXHAUSTED
+    x-ratelimit-user-10min-limit: 30 / remaining: 29
+  Confirmed z.ai official CLI also returns 429 → account-level daily quota used up, not a code bug.
+- Root cause of "stuck": character-generator retried 2x, llm.ts fetchWithRetry retried 4x (429 is in RETRYABLE_STATUS), and the catch in useGameLogic did setGameStarted(false) but the toast wasn't surfacing clearly, so users saw an empty game table spinning.
+- Fixes:
+  1. /api/chat route: on z.ai 429, return HTTP 429 with body {error:"[QUOTA_EXHAUSTED] z.ai 每日调用额度已用尽..."} so the frontend can detect it.
+  2. llm.ts fetchWithRetry: when 429 + body contains [QUOTA_EXHAUSTED]/daily/额度, return immediately WITHOUT retry (daily quota won't recover by retrying).
+  3. llm.ts isQuotaExhaustedError: now also recognises status 429 + [QUOTA_EXHAUSTED] marker (previously only 402).
+  4. character-generator.ts: on quota error, abort retry immediately (removed the isCustomKeyEnabled() gate so it applies to built-in z.ai quota too).
+  5. useGameLogic.ts startGame catch: call toast.error() synchronously (setTimeout deferral caused sonner to drop the toast during table unmount). Hardcoded clear Chinese message "AI 调用额度已用尽 / z.ai 每日免费调用额度已耗尽，请稍后重试（通常次日重置）。" with 15s duration.
+  6. Updated i18n quotaExhausted messages in zh.json/en.json.
+- Browser-verified end-to-end: click Start → ~7s later page returns to welcome screen + sonner toast appears at top-center reading "AI 调用额度已用尽...". Confirmed via document.querySelector('[data-sonner-toast]').textContent.
+
+Stage Summary:
+- "卡在玩家入场" root cause = z.ai account daily quota = 0 (HTTP 429). Not a code bug.
+- 429 = "Too Many Requests". z.ai enforces two limits: daily (now exhausted) + 30 req / 10 min (still has headroom). Daily resets ~next day 00:00 Beijing time.
+- UX fixed: instead of spinning forever, the game now fails fast (~7s), returns to the welcome screen, and shows a clear toast explaining the quota situation.

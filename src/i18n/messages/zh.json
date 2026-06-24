@@ -2113,8 +2113,8 @@
     "werewolfResult": "狼人",
     "goodResult": "好人",
     "quotaExhausted": {
-      "title": "API Key 余额已耗尽",
-      "description": "游戏无法继续，请前往对应平台充值后重新开始游戏。"
+      "title": "AI 调用额度已用尽",
+      "description": "z.ai 每日免费调用额度已耗尽，请稍后重试（通常次日重置）。"
     }
   },
   "customKey": {
