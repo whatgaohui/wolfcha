@@ -1,0 +1,1757 @@
+     1→"use client";
+     2→
+     3→import { useEffect, useState, useMemo, useCallback, useRef, type CSSProperties } from "react";
+     4→import { AnimatePresence, motion, type TargetAndTransition } from "framer-motion";
+     5→import { toast } from "sonner";
+     6→import {
+     7→  Users,
+     8→  NotePencil,
+     9→  X,
+    10→  Eye,
+    11→  Skull,
+    12→  Shield,
+    13→  Drop,
+    14→  Crosshair,
+    15→  GearSix,
+    16→} from "@phosphor-icons/react";
+    17→import {
+    18→  WerewolfIcon,
+    19→  NightIcon,
+    20→  DayIcon,
+    21→  SpeechIcon,
+    22→  TimerIcon,
+    23→  SeerIcon,
+    24→  WitchIcon,
+    25→  HunterIcon,
+    26→  GuardIcon,
+    27→  VillagerIcon,
+    28→} from "@/components/icons/FlatIcons";
+    29→import { useTypewriter } from "@/hooks/useTypewriter";
+    30→import { useGameLogic } from "@/hooks/useGameLogic";
+    31→import type { Player, Role } from "@/types/game";
+    32→import { isWolfRole } from "@/types/game";
+    33→import { PHASE_CONFIGS, isGameInProgress } from "@/store/game-machine";
+    34→import { getI18n } from "@/i18n/translator";
+    35→import { getSystemMessages, getSystemPatterns } from "@/lib/game-texts";
+    36→import { useTranslations } from "next-intl";
+    37→import { useAtom } from "jotai";
+    38→import { BADGE_TRANSFER_TORN } from "@/lib/game-master";
+    39→
+    40→// Components
+    41→import { WelcomeScreen } from "@/components/game/WelcomeScreen";
+    42→import { PlayerCardCompact } from "@/components/game/PlayerCardCompact";
+    43→import { DialogArea } from "@/components/game/DialogArea";
+    44→import { BottomActionPanel } from "@/components/game/BottomActionPanel";
+    45→import { Notebook } from "@/components/game/Notebook";
+    46→import { GameBackground } from "@/components/game/GameBackground";
+    47→import { PlayerDetailModal } from "@/components/game/PlayerDetailModal";
+    48→import { RoleRevealOverlay } from "@/components/game/RoleRevealOverlay";
+    49→import { NightActionOverlay, type NightActionOverlayType } from "@/components/game/NightActionOverlay";
+    50→import { TutorialOverlay, type TutorialPayload } from "@/components/game/TutorialOverlay";
+    51→import { DevConsole, DevModeButton } from "@/components/DevTools";
+    52→import { SettingsModal } from "@/components/game/SettingsModal";
+    53→
+    54→import { buildSimpleAvatarUrl, getModelLogoUrl } from "@/lib/avatar-config";
+    55→import { audioManager, makeAudioTaskId } from "@/lib/audio-manager";
+    56→import { getNarratorPlayer } from "@/lib/narrator-audio-player";
+    57→import { resolveVoiceId, type AppLocale } from "@/lib/voice-constants";
+    58→import { getLocale } from "@/i18n/locale-store";
+    59→import { useSettings } from "@/hooks/useSettings";
+    60→import { useTutorial } from "@/hooks/useTutorial";
+    61→import { persistReferralFromCurrentUrl, removeReferralFromCurrentUrl } from "@/lib/referral";
+    62→import { useRouter, useParams } from "next/navigation";
+    63→import { useGameAnalysis } from "@/hooks/useGameAnalysis";
+    64→
+    65→const RITUAL_CUE_DURATION_SECONDS = 2.2;
+    66→const DAY_NIGHT_BLINK = {
+    67→  closeMs: 360,
+    68→  holdMs: 120,
+    69→  openMs: 620,
+    70→};
+    71→const dayBgm = "/bgm/day.mp3";
+    72→const nightBgm = "/bgm/night.mp3";
+    73→
+    74→const WC_EYE_FEATHER_VAR = "--wc-eye-feather";
+    75→const WC_LID_VAR = "--wc-lid";
+    76→
+    77→const getPlayerAvatarUrl = (player: Player, isGenshinMode: boolean) => {
+    78→  const isModelAvatar = isGenshinMode && !player.isHuman;
+    79→  if (isModelAvatar) {
+    80→    return getModelLogoUrl(player.agentProfile?.modelRef);
+    81→  }
+    82→  return buildSimpleAvatarUrl(player.avatarSeed ?? player.playerId, {
+    83→    gender: player.agentProfile?.persona?.gender,
+    84→  });
+    85→};
+    86→
+    87→const getRoleLabel = (role?: Role | null) => {
+    88→  const { t } = getI18n();
+    89→  switch (role) {
+    90→    case "Werewolf": return t("roles.werewolf");
+    91→    case "Seer": return t("roles.seer");
+    92→    case "Witch": return t("roles.witch");
+    93→    case "Hunter": return t("roles.hunter");
+    94→    case "Guard": return t("roles.guard");
+    95→    case "Idiot": return t("roles.idiot");
+    96→    case "WhiteWolfKing": return t("roles.whiteWolfKing");
+    97→    case "Villager": return t("roles.villager");
+    98→    default: return "?";
+    99→  }
+   100→};
+   101→
+   102→function getRitualCueFromSystemMessage(content: string): { title: string; subtitle?: string } | null {
+   103→  const { t } = getI18n();
+   104→  const systemMessages = getSystemMessages();
+   105→  const patterns = getSystemPatterns();
+   106→  const nightFallRegex = new RegExp(patterns.nightFall);
+   107→  const playerKilledRegex = new RegExp(patterns.playerKilled);
+   108→  const playerPoisonedRegex = new RegExp(patterns.playerPoisoned);
+   109→  const badgeElectedRegex = new RegExp(patterns.badgeElected);
+   110→  const playerExecutedRegex = new RegExp(patterns.playerExecuted);
+   111→  const text = content.trim();
+   112→  if (text === systemMessages.gameStart) return { title: t("ritual.gameStart") };
+   113→  if (nightFallRegex.test(text)) return { title: text };
+   114→  if (text === systemMessages.guardActionStart) return { title: text };
+   115→  if (text === systemMessages.wolfActionStart) return { title: text };
+   116→  if (text === systemMessages.witchActionStart) return { title: text };
+   117→  if (text === systemMessages.seerActionStart) return { title: text };
+   118→  if (text === systemMessages.peacefulNight) return { title: systemMessages.peacefulNight };
+   119→  if (playerKilledRegex.test(text)) return { title: text };
+   120→  if (playerPoisonedRegex.test(text)) return { title: text };
+   121→  if (text === systemMessages.dayBreak) return { title: systemMessages.dayBreak };
+   122→  if (text === t("badgePhase.signupStart")) return { title: t("ritual.badgeSignup") };
+   123→  if (text === systemMessages.badgeSpeechStart) {
+   124→    return { title: t("ritual.badgeSpeechTitle"), subtitle: t("ritual.badgeSpeechSubtitle") };
+   125→  }
+   126→  if (text === systemMessages.badgeElectionStart) return { title: systemMessages.badgeElectionStart };
+   127→  if (text === systemMessages.badgeRevote) return { title: systemMessages.badgeRevote };
+   128→  if (badgeElectedRegex.test(text)) return { title: text };
+   129→  if (text === systemMessages.dayDiscussion) return { title: systemMessages.dayDiscussion };
+   130→  if (text === systemMessages.voteStart) return { title: systemMessages.voteStart };
+   131→  if (playerExecutedRegex.test(text)) return { title: text };
+   132→  if (text === systemMessages.voteTie) return { title: systemMessages.voteTie };
+   133→  return null;
+   134→}
+   135→
+   136→// ============ 工具函数 ============
+   137→
+   138→// ============ 主组件 ============
+   139→
+   140→export default function Home() {
+   141→  const t = useTranslations();
+   142→  const router = useRouter();
+   143→  const params = useParams();
+   144→  const slug = params?.slug as string | undefined;
+   145→  const {
+   146→    humanName,
+   147→    setHumanName,
+   148→    gameStarted,
+   149→    gameState,
+   150→    isLoading,
+   151→    isWaitingForAI,
+   152→    currentDialogue,
+   153→    inputText,
+   154→    setInputText,
+   155→    showTable,
+   156→    humanPlayer,
+   157→    isNight,
+   158→    startGame,
+   159→    continueAfterRoleReveal,
+   160→    restartGame,
+   161→    handleHumanSpeech,
+   162→    handleFinishSpeaking,
+   163→    handleBadgeSignup,
+   164→    handleHumanVote,
+   165→    handleNightAction,
+   166→    handleHumanBadgeTransfer,
+   167→    handleWhiteWolfKingBoom,
+   168→    handleNextRound,
+   169→    waitingForNextRound,
+   170→    advanceSpeech,
+   171→    markCurrentSegmentCompleted,
+   172→    shouldAutoAdvanceToNextAI,
+   173→  } = useGameLogic();
+   174→  const { settings, setBgmVolume, setSoundEnabled, setAiVoiceEnabled, setGenshinMode, setSpectatorMode, setAutoAdvanceDialogueEnabled } = useSettings();
+   175→  const { bgmVolume, isSoundEnabled, isAiVoiceEnabled, isGenshinMode, isSpectatorMode, isAutoAdvanceDialogueEnabled } = settings;
+   176→  const shouldUseAiVoice = isSoundEnabled && isAiVoiceEnabled && bgmVolume > 0;
+   177→  
+   178→  // Exit game functionality - use restartGame which properly handles all state resets
+   179→  const gameInProgress = useMemo(() => isGameInProgress(gameState), [gameState]);
+   180→  const {
+   181→    state: tutorialState,
+   182→    isLoaded: isTutorialLoaded,
+   183→    canAutoPrompt,
+   184→    setAutoPromptEnabled,
+   185→    markSeenNightIntro,
+   186→    markSeenDayIntro,
+   187→    markSeenRole,
+   188→  } = useTutorial();
+   189→
+   190→  // 游戏结束时自动触发复盘分析生成
+   191→  const { isLoading: isAnalysisLoading } = useGameAnalysis();
+   192→
+   193→  const [visualIsNight, setVisualIsNight] = useState(isNight);
+   194→  const visualIsNightRef = useRef(isNight);
+   195→  const [isMobile, setIsMobile] = useState(false);
+   196→  const [dayNightBlinkPhase, setDayNightBlinkPhase] = useState<null | "closing" | "opening">(null);
+   197→  const dayNightBlinkTokenRef = useRef(0);
+   198→  const dayNightBlinkTimeoutsRef = useRef<number[]>([]);
+   199→  const pendingNightBlinkRef = useRef(false);
+   200→  const lastNightCueIdRef = useRef<string | null>(null);
+   201→
+   202→  useEffect(() => {
+   203→    visualIsNightRef.current = visualIsNight;
+   204→  }, [visualIsNight]);
+   205→
+   206→  useEffect(() => {
+   207→    persistReferralFromCurrentUrl();
+   208→    removeReferralFromCurrentUrl();
+   209→  }, []);
+   210→
+   211→  useEffect(() => {
+   212→    const media = window.matchMedia("(max-width: 768px)");
+   213→    const update = () => setIsMobile(media.matches);
+   214→    update();
+   215→    if (media.addEventListener) {
+   216→      media.addEventListener("change", update);
+   217→      return () => media.removeEventListener("change", update);
+   218→    }
+   219→    media.addListener(update);
+   220→    return () => media.removeListener(update);
+   221→  }, []);
+   222→
+   223→  useEffect(() => {
+   224→    document.documentElement.setAttribute("data-theme", visualIsNight ? "dark" : "light");
+   225→  }, [visualIsNight]);
+   226→
+   227→  useEffect(() => {
+   228→    if (gameState.phase !== "GAME_END") return;
+   229→    setAiVoiceEnabled(false);
+   230→  }, [gameState.phase, setAiVoiceEnabled]);
+   231→
+   232→  const handleViewAnalysis = useCallback(() => {
+   233→    const basePath = slug ? `/${slug}` : "";
+   234→    const gameIdShort = gameState.gameId?.substring(0, 6).toUpperCase() || "";
+   235→    router.push(`${basePath}/analysis#${gameIdShort}`);
+   236→  }, [router, slug, gameState.gameId]);
+   237→
+   238→  const clearDayNightBlinkTimers = useCallback(() => {
+   239→    dayNightBlinkTimeoutsRef.current.forEach((t) => window.clearTimeout(t));
+   240→    dayNightBlinkTimeoutsRef.current = [];
+   241→  }, []);
+   242→
+   243→  const scheduleDayNightBlink = useCallback((targetIsNight: boolean, delayMs = 0) => {
+   244→    if (visualIsNightRef.current === targetIsNight) return;
+   245→
+   246→    clearDayNightBlinkTimers();
+   247→    const token = ++dayNightBlinkTokenRef.current;
+   248→
+   249→    const beginBlink = () => {
+   250→      if (dayNightBlinkTokenRef.current !== token) return;
+   251→      setDayNightBlinkPhase("closing");
+   252→
+   253→      const { closeMs, holdMs, openMs } = DAY_NIGHT_BLINK;
+   254→      const t1 = window.setTimeout(() => {
+   255→        if (dayNightBlinkTokenRef.current !== token) return;
+   256→        setVisualIsNight(targetIsNight);
+   257→        const tHold = window.setTimeout(() => {
+   258→          if (dayNightBlinkTokenRef.current !== token) return;
+   259→          setDayNightBlinkPhase("opening");
+   260→          const t2 = window.setTimeout(() => {
+   261→            if (dayNightBlinkTokenRef.current !== token) return;
+   262→            setDayNightBlinkPhase(null);
+   263→          }, openMs);
+   264→          dayNightBlinkTimeoutsRef.current.push(t2);
+   265→        }, holdMs);
+   266→        dayNightBlinkTimeoutsRef.current.push(tHold);
+   267→      }, closeMs);
+   268→      dayNightBlinkTimeoutsRef.current.push(t1);
+   269→    };
+   270→
+   271→    if (delayMs > 0) {
+   272→      const tStart = window.setTimeout(beginBlink, delayMs);
+   273→      dayNightBlinkTimeoutsRef.current.push(tStart);
+   274→    } else {
+   275→      beginBlink();
+   276→    }
+   277→  }, [clearDayNightBlinkTimers]);
+   278→
+   279→  useEffect(() => {
+   280→    if (isNight === visualIsNightRef.current) return;
+   281→
+   282→    if (isNight) {
+   283→      // Mark that we need to blink to night
+   284→      pendingNightBlinkRef.current = true;
+   285→      
+   286→      // In spectator mode (no human player), trigger night blink immediately
+   287→      // because the game progresses quickly without waiting for role reveal
+   288→      if (showTable && !humanPlayer) {
+   289→        scheduleDayNightBlink(true, 0);
+   290→        pendingNightBlinkRef.current = false;
+   291→      }
+   292→      return;
+   293→    }
+   294→
+   295→    // Transition to day immediately
+   296→    pendingNightBlinkRef.current = false;
+   297→    lastNightCueIdRef.current = null;
+   298→    scheduleDayNightBlink(false, 0);
+   299→  }, [isNight, scheduleDayNightBlink, showTable, humanPlayer]);
+   300→
+   301→  useEffect(() => {
+   302→    return () => {
+   303→      clearDayNightBlinkTimers();
+   304→    };
+   305→  }, [clearDayNightBlinkTimers]);
+   306→
+   307→  const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
+   308→  const bgmUnlockedRef = useRef(false);
+   309→  const bgmFadeAnimationRef = useRef<number | null>(null);
+   310→  const bgmLoopFadeRef = useRef(false);
+   311→  const bgmManualFadeRef = useRef(false);
+   312→  const showTableRef = useRef(showTable);
+   313→  const isNightRef = useRef(isNight);
+   314→  const bgmVolumeRef = useRef(bgmVolume);
+   315→  const isSoundEnabledRef = useRef(isSoundEnabled);
+   316→  const LOOP_FADE_DURATION_MS = 1200;
+   317→  const resolveAudioSrc = useCallback((src: string) => {
+   318→    if (typeof window === "undefined") return src;
+   319→    try {
+   320→      return new URL(src, window.location.href).href;
+   321→    } catch {
+   322→      return src;
+   323→    }
+   324→  }, []);
+   325→  useEffect(() => {
+   326→    showTableRef.current = showTable;
+   327→  }, [showTable]);
+   328→  useEffect(() => {
+   329→    isNightRef.current = isNight;
+   330→  }, [isNight]);
+   331→  useEffect(() => {
+   332→    bgmVolumeRef.current = bgmVolume;
+   333→  }, [bgmVolume]);
+   334→  useEffect(() => {
+   335→    isSoundEnabledRef.current = isSoundEnabled;
+   336→  }, [isSoundEnabled]);
+   337→
+   338→  // Fade in/out helper function
+   339→  const fadeAudio = useCallback((
+   340→    audio: HTMLAudioElement,
+   341→    targetVolume: number,
+   342→    duration: number = 1000,
+   343→    onComplete?: () => void
+   344→  ) => {
+   345→    // Cancel any existing fade animation
+   346→    if (bgmFadeAnimationRef.current !== null) {
+   347→      cancelAnimationFrame(bgmFadeAnimationRef.current);
+   348→    }
+   349→
+   350→    const startVolume = audio.volume;
+   351→    const startTime = performance.now();
+   352→    const volumeDiff = targetVolume - startVolume;
+   353→
+   354→    const animate = (currentTime: number) => {
+   355→      const elapsed = currentTime - startTime;
+   356→      const progress = Math.min(elapsed / duration, 1);
+   357→      
+   358→      // Use ease-in-out curve for smoother transition
+   359→      const easedProgress = progress < 0.5
+   360→        ? 2 * progress * progress
+   361→        : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+   362→      
+   363→      audio.volume = startVolume + volumeDiff * easedProgress;
+   364→
+   365→      if (progress < 1) {
+   366→        bgmFadeAnimationRef.current = requestAnimationFrame(animate);
+   367→      } else {
+   368→        bgmFadeAnimationRef.current = null;
+   369→        onComplete?.();
+   370→      }
+   371→    };
+   372→
+   373→    bgmFadeAnimationRef.current = requestAnimationFrame(animate);
+   374→  }, []);
+   375→
+   376→  const attachLoopFade = useCallback((audio: HTMLAudioElement) => {
+   377→    const handleTimeUpdate = () => {
+   378→      if (bgmManualFadeRef.current) return;
+   379→      if (!showTableRef.current || !isSoundEnabledRef.current) return;
+   380→      if (bgmLoopFadeRef.current) return;
+   381→      const duration = audio.duration;
+   382→      if (!Number.isFinite(duration) || duration <= 0) return;
+   383→      const remaining = duration - audio.currentTime;
+   384→      if (remaining > LOOP_FADE_DURATION_MS / 1000) return;
+   385→
+   386→      bgmLoopFadeRef.current = true;
+   387→      fadeAudio(audio, 0, LOOP_FADE_DURATION_MS, () => {
+   388→        if (!bgmAudioRef.current) return;
+   389→        if (!showTableRef.current || !isSoundEnabledRef.current) {
+   390→          bgmLoopFadeRef.current = false;
+   391→          return;
+   392→        }
+   393→        const targetVolume = bgmVolumeRef.current;
+   394→        audio.currentTime = 0;
+   395→        audio.volume = 0;
+   396→        void audio.play().catch(() => {});
+   397→        fadeAudio(audio, targetVolume, LOOP_FADE_DURATION_MS, () => {
+   398→          bgmLoopFadeRef.current = false;
+   399→        });
+   400→      });
+   401→    };
+   402→    audio.addEventListener("timeupdate", handleTimeUpdate);
+   403→    return () => audio.removeEventListener("timeupdate", handleTimeUpdate);
+   404→  }, [fadeAudio, LOOP_FADE_DURATION_MS]);
+   405→
+   406→  useEffect(() => {
+   407→    const audio = new Audio();
+   408→    audio.loop = false;
+   409→    audio.volume = isSoundEnabledRef.current ? bgmVolumeRef.current : 0;
+   410→    bgmAudioRef.current = audio;
+   411→    const cleanupLoopFade = attachLoopFade(audio);
+   412→    return () => {
+   413→      if (bgmFadeAnimationRef.current !== null) {
+   414→        cancelAnimationFrame(bgmFadeAnimationRef.current);
+   415→      }
+   416→      cleanupLoopFade();
+   417→      audio.pause();
+   418→      bgmAudioRef.current = null;
+   419→    };
+   420→  }, [attachLoopFade]);
+   421→
+   422→  useEffect(() => {
+   423→    const unlock = () => {
+   424→      if (bgmUnlockedRef.current) return;
+   425→      if (!isSoundEnabledRef.current) return;
+   426→      bgmUnlockedRef.current = true;
+   427→      const audio = bgmAudioRef.current;
+   428→      if (!audio) return;
+   429→
+   430→      const desiredSrc = isNightRef.current ? nightBgm : dayBgm;
+   431→      const desiredResolved = resolveAudioSrc(desiredSrc);
+   432→      const currentResolved = audio.currentSrc || resolveAudioSrc(audio.src);
+   433→      if (currentResolved !== desiredResolved) {
+   434→        audio.src = desiredSrc;
+   435→        audio.load();
+   436→      }
+   437→
+   438→      audio.volume = bgmVolumeRef.current;
+   439→      // 必须在用户手势内触发一次 play 才能解锁后续自动播放
+   440→      void audio.play().catch(() => {});
+   441→
+   442→      // 如果还没进入游戏界面，立刻暂停，避免欢迎页响起
+   443→      if (!showTableRef.current) {
+   444→        audio.pause();
+   445→      }
+   446→    };
+   447→    window.addEventListener("pointerdown", unlock, { passive: true });
+   448→    return () => window.removeEventListener("pointerdown", unlock);
+   449→  }, [resolveAudioSrc]);
+   450→
+   451→  useEffect(() => {
+   452→    const audio = bgmAudioRef.current;
+   453→    if (!audio) return;
+   454→
+   455→    const desiredVolume = isSoundEnabled ? bgmVolume : 0;
+   456→
+   457→    if (!showTable || !isSoundEnabled) {
+   458→      // Fade out when hiding table or muting
+   459→      bgmManualFadeRef.current = true;
+   460→      fadeAudio(audio, 0, 800, () => {
+   461→        audio.pause();
+   462→        bgmManualFadeRef.current = false;
+   463→      });
+   464→      return;
+   465→    }
+   466→
+   467→    const desiredSrc = isNight ? nightBgm : dayBgm;
+   468→    const desiredResolved = resolveAudioSrc(desiredSrc);
+   469→    const currentResolved = audio.currentSrc || resolveAudioSrc(audio.src);
+   470→    const isSwitching = currentResolved && currentResolved !== desiredResolved;
+   471→    
+   472→    if (isSwitching) {
+   473→      // Fade out current music, then switch and fade in new music
+   474→      bgmManualFadeRef.current = true;
+   475→      fadeAudio(audio, 0, 1000, () => {
+   476→        if (!bgmAudioRef.current) return;
+   477→        const currentAudio = bgmAudioRef.current;
+   478→        currentAudio.src = desiredSrc;
+   479→        currentAudio.load();
+   480→        bgmLoopFadeRef.current = false;
+   481→        
+   482→        if (bgmUnlockedRef.current) {
+   483→          void currentAudio.play().catch(() => {});
+   484→          // Fade in new music
+   485→          currentAudio.volume = 0;
+   486→          fadeAudio(currentAudio, desiredVolume, 1200, () => {
+   487→            bgmManualFadeRef.current = false;
+   488→          });
+   489→        } else {
+   490→          bgmManualFadeRef.current = false;
+   491→        }
+   492→      });
+   493→    } else {
+   494→      // Just ensure it's playing with correct volume
+   495→      if (currentResolved !== desiredResolved) {
+   496→        audio.src = desiredSrc;
+   497→        audio.load();
+   498→        bgmLoopFadeRef.current = false;
+   499→      }
+   500→      if (bgmUnlockedRef.current) {
+   501→        if (audio.paused) {
+   502→          audio.volume = 0;
+   503→          void audio.play().catch(() => {});
+   504→          bgmManualFadeRef.current = true;
+   505→          fadeAudio(audio, desiredVolume, 1200, () => {
+   506→            bgmManualFadeRef.current = false;
+   507→          });
+   508→        } else if (audio.volume !== desiredVolume) {
+   509→          bgmManualFadeRef.current = true;
+   510→          fadeAudio(audio, desiredVolume, 800, () => {
+   511→            bgmManualFadeRef.current = false;
+   512→          });
+   513→        }
+   514→      }
+   515→    }
+   516→  }, [isNight, showTable, fadeAudio, bgmVolume, isSoundEnabled, resolveAudioSrc]);
+   517→
+   518→  useEffect(() => {
+   519→    audioManager.setEnabled(shouldUseAiVoice);
+   520→  }, [shouldUseAiVoice]);
+   521→
+   522→  useEffect(() => {
+   523→    const narratorPlayer = getNarratorPlayer();
+   524→    narratorPlayer.setVolume(bgmVolume);
+   525→    narratorPlayer.setEnabled(isSoundEnabled && bgmVolume > 0);
+   526→  }, [bgmVolume, isSoundEnabled]);
+   527→
+   528→  // UI 状态
+   529→  const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
+   530→  const [isNotebookOpen, setIsNotebookOpen] = useState(false);
+   531→  const [isEventLogOpen, setIsEventLogOpen] = useState(false);
+   532→  const [isDevConsoleOpen, setIsDevConsoleOpen] = useState(false);
+   533→  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+   534→  const [detailPlayer, setDetailPlayer] = useState<Player | null>(null);
+   535→  const [isRoleRevealOpen, setIsRoleRevealOpen] = useState(false);
+   536→  const [hasShownRoleReveal, setHasShownRoleReveal] = useState(false);
+   537→  const [activeTutorial, setActiveTutorial] = useState<TutorialPayload | null>(null);
+   538→  const [isTutorialOpen, setIsTutorialOpen] = useState(false);
+   539→  const [nightActionOverlay, setNightActionOverlay] = useState<{
+   540→    type: NightActionOverlayType;
+   541→    id: number;
+   542→    target?: { seat: number; name: string; avatarUrl?: string };
+   543→  } | null>(null);
+   544→  const nightActionOverlayTimerRef = useRef<number | null>(null);
+   545→  const showDevTools =
+   546→    process.env.NODE_ENV !== "production" && (process.env.NEXT_PUBLIC_SHOW_DEVTOOLS ?? "true") === "true";
+   547→  const lastNightActionRef = useRef<{
+   548→    wolfTarget?: number;
+   549→    witchSave?: boolean;
+   550→    witchPoison?: number;
+   551→    seerTarget?: number;
+   552→    hunterShotKey?: string | null;
+   553→  }>({});
+   554→  
+   555→  // 检查玩家是否准备就绪（用于召集阶段显示加载状态）
+   556→  const isReady = useMemo(() => {
+   557→    return gameState.players.every((p) => p.displayName?.trim());
+   558→  }, [gameState.players]);
+   559→
+   560→  // 阶段切换时清理选择状态
+   561→  useEffect(() => {
+   562→    const t = window.setTimeout(() => {
+   563→      setSelectedSeat(null);
+   564→    }, 0);
+   565→    return () => window.clearTimeout(t);
+   566→  }, [gameState.phase]);
+   567→
+   568→  const [ritualCue, setRitualCue] = useState<{ id: string; title: string; subtitle?: string } | null>(null);
+   569→  const [lastRitualMessageId, setLastRitualMessageId] = useState<string | null>(null);
+   570→  const ritualCueQueueRef = useRef<Array<{ id: string; title: string; subtitle?: string }>>([]);
+   571→  const lastAdvanceTimeRef = useRef(0);
+   572→  const canShowRole = hasShownRoleReveal || (gameState.day >= 1 && gameState.phase !== "LOBBY");
+   573→  const selectionTone = useMemo(() => {
+   574→    if (!humanPlayer) return undefined;
+   575→    switch (gameState.phase) {
+   576→      case "NIGHT_WOLF_ACTION":
+   577→        return isWolfRole(humanPlayer.role) ? "wolf" : undefined;
+   578→      case "NIGHT_SEER_ACTION":
+   579→        return humanPlayer.role === "Seer" ? "seer" : undefined;
+   580→      case "NIGHT_GUARD_ACTION":
+   581→        return humanPlayer.role === "Guard" ? "guard" : undefined;
+   582→      case "NIGHT_WITCH_ACTION":
+   583→        return humanPlayer.role === "Witch" ? "witch" : undefined;
+   584→      case "HUNTER_SHOOT":
+   585→        return humanPlayer.role === "Hunter" ? "hunter" : undefined;
+   586→      case "DAY_BADGE_ELECTION":
+   587→      case "BADGE_TRANSFER":
+   588→        return "badge";
+   589→      case "DAY_VOTE":
+   590→        return "vote";
+   591→      default:
+   592→        return undefined;
+   593→    }
+   594→  }, [gameState.phase, humanPlayer]);
+   595→
+   596→  useEffect(() => {
+   597→    const lastSystem = [...gameState.messages].reverse().find((m) => m.isSystem);
+   598→    if (!lastSystem) return;
+   599→    if (lastSystem.id && lastSystem.id === lastRitualMessageId) return;
+   600→    const cue = getRitualCueFromSystemMessage(lastSystem.content);
+   601→    if (!cue) return;
+   602→
+   603→    queueMicrotask(() => {
+   604→      setLastRitualMessageId(lastSystem.id || null);
+   605→      const next = { id: lastSystem.id || String(Date.now()), title: cue.title, subtitle: cue.subtitle };
+   606→      if (ritualCue) {
+   607→        ritualCueQueueRef.current.push(next);
+   608→        return;
+   609→      }
+   610→      setRitualCue(next);
+   611→    });
+   612→  }, [gameState.messages, lastRitualMessageId, ritualCue]);
+   613→
+   614→  // Trigger night blink when we see the nightfall ritual cue
+   615→  useEffect(() => {
+   616→    if (!ritualCue || !isNight) return;
+   617→    if (!pendingNightBlinkRef.current) return;
+   618→    if (!showTable || isRoleRevealOpen) return;
+   619→    
+   620→    const text = ritualCue.title.trim();
+   621→    const nightFallRegex = new RegExp(getSystemPatterns().nightFall);
+   622→    if (!nightFallRegex.test(text)) return;
+   623→    if (lastNightCueIdRef.current === ritualCue.id) return;
+   624→
+   625→    lastNightCueIdRef.current = ritualCue.id;
+   626→    pendingNightBlinkRef.current = false;
+   627→    scheduleDayNightBlink(true, Math.round(RITUAL_CUE_DURATION_SECONDS * 1000));
+   628→  }, [ritualCue, isNight, scheduleDayNightBlink, showTable, isRoleRevealOpen]);
+   629→
+   630→  // Fallback: directly monitor messages for nightfall cue
+   631→  useEffect(() => {
+   632→    if (!isNight || !pendingNightBlinkRef.current) return;
+   633→    if (!ritualCue || !showTable || isRoleRevealOpen) return;
+   634→    
+   635→    const lastSystemMsg = [...gameState.messages].reverse().find(m => m.isSystem);
+   636→    if (!lastSystemMsg) return;
+   637→    
+   638→    const text = lastSystemMsg.content.trim();
+   639→    const nightFallRegex = new RegExp(getSystemPatterns().nightFall);
+   640→    if (!nightFallRegex.test(text)) return;
+   641→    
+   642→    const cueId = ritualCue.id;
+   643→    if (lastNightCueIdRef.current === cueId) return;
+   644→    
+   645→    // Found nightfall message and haven't processed it yet
+   646→    lastNightCueIdRef.current = cueId;
+   647→    pendingNightBlinkRef.current = false;
+   648→    
+   649→    // Schedule the blink after a short delay to ensure ritual cue is shown
+   650→    const timer = window.setTimeout(() => {
+   651→      scheduleDayNightBlink(true, Math.round(RITUAL_CUE_DURATION_SECONDS * 1000));
+   652→    }, 100);
+   653→    
+   654→    return () => window.clearTimeout(timer);
+   655→  }, [gameState.messages, isNight, scheduleDayNightBlink, ritualCue, showTable, isRoleRevealOpen]);
+   656→
+   657→  // Typewriter effect
+   658→  const typewriterSpeed = useMemo(() => {
+   659→    const text = currentDialogue?.text || "";
+   660→    if (!currentDialogue?.isStreaming) return 25;
+   661→    if (!text.trim()) return 25;
+   662→    if (text.includes(t("dayPhase.organizing")) || text.includes(t("ui.generatingVoice"))) return 25;
+   663→
+   664→    const player = gameState.players.find((p) => p.displayName === currentDialogue.speaker);
+   665→    const locale = getLocale() as AppLocale;
+   666→    const voiceId = resolveVoiceId(
+   667→      player?.agentProfile?.persona?.voiceId,
+   668→      player?.agentProfile?.persona?.gender,
+   669→      player?.agentProfile?.persona?.age,
+   670→      locale
+   671→    );
+   672→    const taskId = makeAudioTaskId(voiceId, text);
+   673→    const durationMs = audioManager.getCachedDurationMs(taskId);
+   674→    if (!durationMs || durationMs <= 0) return 25;
+   675→
+   676→    const raw = durationMs / Math.max(1, text.length);
+   677→    return Math.min(60, Math.max(10, Math.round(raw)));
+   678→  }, [currentDialogue, gameState.players]);
+   679→
+   680→  const { displayedText, isTyping, completedText } = useTypewriter({
+   681→    text: currentDialogue?.text || "",
+   682→    speed: typewriterSpeed,
+   683→    enabled: !!currentDialogue?.isStreaming,
+   684→  });
+   685→
+   686→  useEffect(() => {
+   687→    if (!currentDialogue?.isStreaming) return;
+   688→    if (!completedText) return;
+   689→    if (completedText !== currentDialogue.text) return;
+   690→    markCurrentSegmentCompleted();
+   691→  }, [completedText, currentDialogue, markCurrentSegmentCompleted]);
+   692→
+   693→  // Enter/Right key to advance AI speech or move to next round
+   694→  useEffect(() => {
+   695→    const handleKeyDown = (e: KeyboardEvent) => {
+   696→      if (isRoleRevealOpen) return;
+   697→
+   698→      // 检查焦点是否在输入元素内（input, textarea, contenteditable）
+   699→      const activeEl = document.activeElement;
+   700→      const isInInput = activeEl instanceof HTMLInputElement ||
+   701→        activeEl instanceof HTMLTextAreaElement ||
+   702→        activeEl?.getAttribute("contenteditable") === "true" ||
+   703→        activeEl?.closest("[contenteditable='true']") !== null;
+   704→
+   705→      // 如果笔记本打开，不拦截 Enter 键（让笔记本正常换行）
+   706→      if ((isNotebookOpen || isEventLogOpen) && e.key === "Enter") return;
+   707→
+   708→      // 如果焦点在输入元素内，不拦截左右方向键（让光标正常移动）
+   709→      if (isInInput && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
+   710→
+   711→      // 如果焦点在输入元素内，不拦截 Enter 键（让输入框正常处理）
+   712→      if (isInInput && e.key === "Enter") return;
+   713→
+   714→      // Enter or Right arrow to advance
+   715→      if ((e.key === "Enter" && !e.shiftKey) || e.key === "ArrowRight") {
+   716→        // 当AI在发言时（有currentDialogue），按键推进下一句
+   717→        if (currentDialogue) {
+   718→          e.preventDefault();
+   719→          audioManager.stopCurrent();
+   720→          Promise.resolve(advanceSpeech()).then((r) => {
+   721→            if (r?.shouldAdvanceToNextSpeaker) {
+   722→              handleNextRound();
+   723→            }
+   724→          });
+   725→          return;
+   726→        }
+   727→        
+   728→        // 等待下一轮时，按键进入下一轮
+   729→        if (waitingForNextRound) {
+   730→          e.preventDefault();
+   731→          handleNextRound();
+   732→        }
+   733→      }
+   734→    };
+   735→    
+   736→    window.addEventListener("keydown", handleKeyDown);
+   737→    return () => window.removeEventListener("keydown", handleKeyDown);
+   738→  }, [currentDialogue, waitingForNextRound, advanceSpeech, handleNextRound, isRoleRevealOpen, isNotebookOpen, isEventLogOpen]);
+   739→
+   740→  const handleAdvanceDialogue = useCallback(async () => {
+   741→    if (isRoleRevealOpen) return;
+   742→    const now = Date.now();
+   743→    if (now - lastAdvanceTimeRef.current < 300) return;
+   744→    lastAdvanceTimeRef.current = now;
+   745→
+   746→    if (currentDialogue) {
+   747→      const r = await advanceSpeech();
+   748→      if (r?.shouldAdvanceToNextSpeaker) {
+   749→        await handleNextRound();
+   750→      }
+   751→      return;
+   752→    }
+   753→
+   754→    if (waitingForNextRound) {
+   755→      await handleNextRound();
+   756→    }
+   757→  }, [advanceSpeech, currentDialogue, handleNextRound, isRoleRevealOpen, waitingForNextRound]);
+   758→
+   759→  const autoAdvanceTimeoutRef = useRef<number | null>(null);
+   760→  const lastAutoAdvanceSignatureRef = useRef<string | null>(null);
+   761→  const autoAdvanceDelayMs = 2500;
+   762→  
+   763→  // Track when typing finishes to trigger auto-advance
+   764→  useEffect(() => {
+   765→    const clearAutoAdvanceTimeout = () => {
+   766→      if (autoAdvanceTimeoutRef.current !== null) {
+   767→        window.clearTimeout(autoAdvanceTimeoutRef.current);
+   768→        autoAdvanceTimeoutRef.current = null;
+   769→      }
+   770→    };
+   771→
+   772→    if (!isAutoAdvanceDialogueEnabled) {
+   773→      clearAutoAdvanceTimeout();
+   774→      return;
+   775→    }
+   776→    if (!showTable) {
+   777→      clearAutoAdvanceTimeout();
+   778→      return;
+   779→    }
+   780→    if (isRoleRevealOpen) {
+   781→      clearAutoAdvanceTimeout();
+   782→      return;
+   783→    }
+   784→    if (isSettingsOpen) {
+   785→      clearAutoAdvanceTimeout();
+   786→      return;
+   787→    }
+   788→    if (isNotebookOpen || isEventLogOpen) {
+   789→      clearAutoAdvanceTimeout();
+   790→      return;
+   791→    }
+   792→    const needsHumanActionNow = PHASE_CONFIGS[gameState.phase].requiresHumanInput(humanPlayer, gameState);
+   793→    if (needsHumanActionNow) {
+   794→      clearAutoAdvanceTimeout();
+   795→      return;
+   796→    }
+   797→    if (isWaitingForAI) {
+   798→      clearAutoAdvanceTimeout();
+   799→      return;
+   800→    }
+   801→
+   802→    if (currentDialogue) {
+   803→      if (currentDialogue.isStreaming) {
+   804→        if (isTyping) return;
+   805→        if (completedText !== currentDialogue.text) return;
+   806→      }
+   807→
+   808→      const signature = currentDialogue.isStreaming
+   809→        ? `DIALOGUE_DONE::${currentDialogue.speaker}::${completedText}`
+   810→        : `DIALOGUE::${currentDialogue.speaker}::${currentDialogue.text}`;
+   811→
+   812→      if (lastAutoAdvanceSignatureRef.current === signature) return;
+   813→      lastAutoAdvanceSignatureRef.current = signature;
+   814→
+   815→      clearAutoAdvanceTimeout();
+   816→
+   817→      const delayMs = autoAdvanceDelayMs;
+   818→      autoAdvanceTimeoutRef.current = window.setTimeout(() => {
+   819→        void handleAdvanceDialogue();
+   820→      }, delayMs);
+   821→      return;
+   822→    }
+   823→
+   824→    if (waitingForNextRound) {
+   825→      const signature = `NEXT::${gameState.phase}::${gameState.day}::${String(gameState.currentSpeakerSeat ?? "")}`;
+   826→      if (lastAutoAdvanceSignatureRef.current === signature) return;
+   827→      lastAutoAdvanceSignatureRef.current = signature;
+   828→
+   829→      clearAutoAdvanceTimeout();
+   830→
+   831→      const delayMs = 1500;
+   832→      autoAdvanceTimeoutRef.current = window.setTimeout(() => {
+   833→        void handleAdvanceDialogue();
+   834→      }, delayMs);
+   835→    }
+   836→  }, [
+   837→    currentDialogue,
+   838→    isTyping,
+   839→    completedText,
+   840→    gameState.currentSpeakerSeat,
+   841→    gameState,
+   842→    gameState.day,
+   843→    gameState.phase,
+   844→    handleAdvanceDialogue,
+   845→    humanPlayer,
+   846→    isAutoAdvanceDialogueEnabled,
+   847→    isEventLogOpen,
+   848→    isNotebookOpen,
+   849→    isRoleRevealOpen,
+   850→    isSettingsOpen,
+   851→    isWaitingForAI,
+   852→    showTable,
+   853→    waitingForNextRound,
+   854→  ]);
+   855→
+   856→  useEffect(() => {
+   857→    return () => {
+   858→      if (autoAdvanceTimeoutRef.current !== null) {
+   859→        window.clearTimeout(autoAdvanceTimeoutRef.current);
+   860→        autoAdvanceTimeoutRef.current = null;
+   861→      }
+   862→    };
+   863→  }, []);
+   864→
+   865→  useEffect(() => {
+   866→    if (!showTable) return;
+   867→    if (!humanPlayer) return;
+   868→    if (hasShownRoleReveal) return;
+   869→    if (gameState.phase !== "NIGHT_START") return;
+   870→    // 只在第一晚弹身份牌，恢复到后续夜晚时不再弹
+   871→    if (gameState.day !== 1) return;
+   872→    if (!visualIsNight) return;
+   873→    if (dayNightBlinkPhase) return;
+   874→    const t = window.setTimeout(() => {
+   875→      setIsRoleRevealOpen(true);
+   876→      setHasShownRoleReveal(true);
+   877→    }, 380);
+   878→    return () => window.clearTimeout(t);
+   879→  }, [showTable, humanPlayer, hasShownRoleReveal, gameState.phase, gameState.day, visualIsNight, dayNightBlinkPhase]);
+   880→
+   881→  const openTutorial = useCallback(
+   882→    (payload: TutorialPayload, options?: { force?: boolean }) => {
+   883→      if (!options?.force && !canAutoPrompt) return;
+   884→      setActiveTutorial(payload);
+   885→      setIsTutorialOpen(true);
+   886→    },
+   887→    [canAutoPrompt]
+   888→  );
+   889→
+   890→  const handleTutorialOpenChange = useCallback(
+   891→    (open: boolean) => {
+   892→      setIsTutorialOpen(open);
+   893→      if (!open && activeTutorial) {
+   894→        if (activeTutorial.kind === "night_intro") {
+   895→          markSeenNightIntro();
+   896→        } else if (activeTutorial.kind === "day_intro") {
+   897→          markSeenDayIntro();
+   898→        } else if (activeTutorial.kind === "role" && activeTutorial.role) {
+   899→          markSeenRole(activeTutorial.role);
+   900→        }
+   901→        setActiveTutorial(null);
+   902→      }
+   903→    },
+   904→    [activeTutorial, markSeenDayIntro, markSeenNightIntro, markSeenRole]
+   905→  );
+   906→
+   907→  const activeRoleForPhase = useMemo<Role | null>(() => {
+   908→    switch (gameState.phase) {
+   909→      case "NIGHT_WOLF_ACTION":
+   910→        return "Werewolf";
+   911→      case "NIGHT_SEER_ACTION":
+   912→        return "Seer";
+   913→      case "NIGHT_WITCH_ACTION":
+   914→        return "Witch";
+   915→      case "NIGHT_GUARD_ACTION":
+   916→        return "Guard";
+   917→      case "HUNTER_SHOOT":
+   918→        return "Hunter";
+   919→      default:
+   920→        return null;
+   921→    }
+   922→  }, [gameState.phase]);
+   923→
+   924→  const isRoleActionForHuman = useMemo(() => {
+   925→    if (!humanPlayer || !activeRoleForPhase) return false;
+   926→    if (!humanPlayer.alive) return false;
+   927→    if (humanPlayer.role !== activeRoleForPhase) return false;
+   928→    return PHASE_CONFIGS[gameState.phase].requiresHumanInput(humanPlayer, gameState);
+   929→  }, [activeRoleForPhase, gameState, humanPlayer]);
+   930→
+   931→  useEffect(() => {
+   932→    if (!showTable) return;
+   933→    if (!isTutorialLoaded) return;
+   934→    if (!tutorialState.enabled) return;
+   935→    if (isRoleRevealOpen) return;
+   936→    if (isTutorialOpen) return;
+   937→    if (!humanPlayer) return;
+   938→    if (!hasShownRoleReveal && gameState.phase === "NIGHT_START") return;
+   939→
+   940→    if (!tutorialState.seenNightIntro && gameState.phase.includes("NIGHT") && visualIsNight) {
+   941→      queueMicrotask(() => {
+   942→        openTutorial({ kind: "night_intro", phase: gameState.phase });
+   943→      });
+   944→      return;
+   945→    }
+   946→
+   947→    if (!tutorialState.seenDayIntro && gameState.phase.startsWith("DAY") && !visualIsNight) {
+   948→      queueMicrotask(() => {
+   949→        openTutorial({ kind: "day_intro", phase: gameState.phase });
+   950→      });
+   951→      return;
+   952→    }
+   953→
+   954→    if (isRoleActionForHuman && !tutorialState.seenRoles[humanPlayer.role]) {
+   955→      queueMicrotask(() => {
+   956→        openTutorial({ kind: "role", role: humanPlayer.role, phase: gameState.phase });
+   957→      });
+   958→    }
+   959→  }, [
+   960→    gameState.phase,
+   961→    humanPlayer,
+   962→    isRoleActionForHuman,
+   963→    isRoleRevealOpen,
+   964→    isTutorialLoaded,
+   965→    isTutorialOpen,
+   966→    openTutorial,
+   967→    showTable,
+   968→    tutorialState.enabled,
+   969→    tutorialState.seenDayIntro,
+   970→    tutorialState.seenNightIntro,
+   971→    tutorialState.seenRoles,
+   972→    visualIsNight,
+   973→  ]);
+   974→
+   975→  const tutorialHelpLabel = useMemo(() => {
+   976→    if (isRoleActionForHuman && humanPlayer) {
+   977→      return t("page.roleHelp", { role: getRoleLabel(humanPlayer.role) });
+   978→    }
+   979→    if (gameState.phase === "DAY_VOTE" || gameState.phase === "DAY_BADGE_ELECTION") {
+   980→      return t("page.voteHelp");
+   981→    }
+   982→    return t("page.tutorialTitle");
+   983→  }, [gameState.phase, humanPlayer, isRoleActionForHuman, t]);
+   984→
+   985→  const showTutorialHelp = useMemo(() => {
+   986→    return (
+   987→      isRoleActionForHuman ||
+   988→      gameState.phase === "DAY_VOTE" ||
+   989→      gameState.phase === "DAY_BADGE_ELECTION"
+   990→    );
+   991→  }, [gameState.phase, isRoleActionForHuman]);
+   992→
+   993→  const handleTutorialHelpOpen = useCallback(() => {
+   994→    if (isRoleActionForHuman && humanPlayer) {
+   995→      openTutorial({ kind: "role", role: humanPlayer.role, phase: gameState.phase }, { force: true });
+   996→      return;
+   997→    }
+   998→    openTutorial({ kind: "day_intro", phase: gameState.phase }, { force: true });
+   999→  }, [gameState.phase, humanPlayer, isRoleActionForHuman, openTutorial]);
+  1000→
+  1001→  // API Key 检查（现在由服务端管理，此检查已不再需要）
+  1002→  useEffect(() => {
+  1003→    if (showTable) return;
+  1004→    queueMicrotask(() => {
+  1005→      setIsRoleRevealOpen(false);
+  1006→      setHasShownRoleReveal(false);
+  1007→    });
+  1008→  }, [showTable]);
+  1009→
+  1010→  useEffect(() => {
+  1011→    if (showTable) return;
+  1012→    queueMicrotask(() => {
+  1013→      setActiveTutorial(null);
+  1014→      setIsTutorialOpen(false);
+  1015→    });
+  1016→  }, [showTable]);
+  1017→
+  1018→  const triggerNightOverlay = useCallback((type: NightActionOverlayType, targetSeat?: number) => {
+  1019→    if (!showTable) return;
+  1020→    if (isRoleRevealOpen) return;
+  1021→    const target =
+  1022→      typeof targetSeat === "number"
+  1023→        ? gameState.players.find((p) => p.seat === targetSeat)
+  1024→        : null;
+  1025→    const targetPayload = target
+  1026→      ? {
+  1027→          seat: target.seat,
+  1028→          name: target.displayName,
+  1029→          avatarUrl: getPlayerAvatarUrl(target, gameState.isGenshinMode ?? false),
+  1030→        }
+  1031→      : undefined;
+  1032→    setNightActionOverlay({ type, id: Date.now(), target: targetPayload });
+  1033→    if (nightActionOverlayTimerRef.current !== null) {
+  1034→      window.clearTimeout(nightActionOverlayTimerRef.current);
+  1035→    }
+  1036→    nightActionOverlayTimerRef.current = window.setTimeout(() => {
+  1037→      setNightActionOverlay(null);
+  1038→    }, 1500);
+  1039→  }, [gameState.players, isRoleRevealOpen, showTable]);
+  1040→
+  1041→  useEffect(() => {
+  1042→    if (!showTable) {
+  1043→      lastNightActionRef.current = {};
+  1044→      queueMicrotask(() => {
+  1045→        setNightActionOverlay(null);
+  1046→      });
+  1047→      return;
+  1048→    }
+  1049→
+  1050→    const { wolfTarget, witchSave, witchPoison, seerTarget } = gameState.nightActions;
+  1051→    const last = lastNightActionRef.current;
+  1052→    const role = humanPlayer?.role;
+  1053→    const isHumanAlive = humanPlayer?.alive;
+  1054→    const canSeeWolf = isWolfRole(role as Role) && isHumanAlive;
+  1055→    const canSeeWitch = role === "Witch" && isHumanAlive;
+  1056→    const canSeeSeer = role === "Seer" && isHumanAlive;
+  1057→    const canSeeHunter = role === "Hunter";
+  1058→
+  1059→    if (canSeeWolf && typeof wolfTarget === "number" && wolfTarget !== last.wolfTarget) {
+  1060→      queueMicrotask(() => {
+  1061→        triggerNightOverlay("wolf", wolfTarget);
+  1062→      });
+  1063→    }
+  1064→
+  1065→    if (canSeeWitch && witchSave && witchSave !== last.witchSave) {
+  1066→      queueMicrotask(() => {
+  1067→        triggerNightOverlay("witch-save", wolfTarget);
+  1068→      });
+  1069→    }
+  1070→
+  1071→    if (canSeeWitch && typeof witchPoison === "number" && witchPoison !== last.witchPoison) {
+  1072→      queueMicrotask(() => {
+  1073→        triggerNightOverlay("witch-poison", witchPoison);
+  1074→      });
+  1075→    }
+  1076→
+  1077→    if (canSeeSeer && typeof seerTarget === "number" && seerTarget !== last.seerTarget) {
+  1078→      queueMicrotask(() => {
+  1079→        triggerNightOverlay("seer", seerTarget);
+  1080→      });
+  1081→    }
+  1082→
+  1083→    const hunterShot =
+  1084→      gameState.nightHistory?.[gameState.day]?.hunterShot ||
+  1085→      gameState.dayHistory?.[gameState.day]?.hunterShot;
+  1086→    const hunterShotKey = hunterShot
+  1087→      ? `${gameState.day}-${hunterShot.hunterSeat}-${hunterShot.targetSeat}`
+  1088→      : null;
+  1089→    if (canSeeHunter && hunterShot && hunterShotKey && hunterShotKey !== last.hunterShotKey) {
+  1090→      queueMicrotask(() => {
+  1091→        triggerNightOverlay("hunter", hunterShot.targetSeat);
+  1092→      });
+  1093→    }
+  1094→
+  1095→    lastNightActionRef.current = {
+  1096→      wolfTarget,
+  1097→      witchSave,
+  1098→      witchPoison,
+  1099→      seerTarget,
+  1100→      hunterShotKey,
+  1101→    };
+  1102→  }, [
+  1103→    gameState.day,
+  1104→    gameState.dayHistory,
+  1105→    gameState.nightActions,
+  1106→    gameState.nightHistory,
+  1107→    humanPlayer,
+  1108→    showTable,
+  1109→    triggerNightOverlay,
+  1110→  ]);
+  1111→
+  1112→  // ============ 交互逻辑 ============
+  1113→
+  1114→  // 判断是否可以点击座位（使用状态机配置）
+  1115→  const canClickSeat = useCallback((player: Player): boolean => {
+  1116→    if (isRoleRevealOpen) return false;
+  1117→    if (!humanPlayer) return false;
+  1118→    if (
+  1119→      gameState.phase === "NIGHT_WITCH_ACTION" &&
+  1120→      humanPlayer.role === "Witch" &&
+  1121→      gameState.roleAbilities.witchPoisonUsed
+  1122→    ) {
+  1123→      return false;
+  1124→    }
+  1125→    const config = PHASE_CONFIGS[gameState.phase];
+  1126→    return config.canSelectPlayer(humanPlayer, player, gameState);
+  1127→  }, [humanPlayer, gameState, isRoleRevealOpen]);
+  1128→
+  1129→  const handleSeatClick = useCallback((player: Player) => {
+  1130→    if (isRoleRevealOpen) return;
+  1131→    if (
+  1132→      humanPlayer &&
+  1133→      gameState.phase === "NIGHT_WITCH_ACTION" &&
+  1134→      humanPlayer.role === "Witch" &&
+  1135→      gameState.roleAbilities.witchPoisonUsed
+  1136→    ) {
+  1137→      toast(t("page.witchPoisonUsed.title"), {
+  1138→        description: t("page.witchPoisonUsed.description"),
+  1139→      });
+  1140→      return;
+  1141→    }
+  1142→    if (!canClickSeat(player)) return;
+  1143→    setSelectedSeat(prev => prev === player.seat ? null : player.seat);
+  1144→  }, [canClickSeat, isRoleRevealOpen, humanPlayer, gameState.phase, gameState.roleAbilities.witchPoisonUsed]);
+  1145→
+  1146→  const confirmSelectedSeat = useCallback(async () => {
+  1147→    if (isRoleRevealOpen) return;
+  1148→    
+  1149→    const phase = gameState.phase;
+  1150→    
+  1151→    // 特殊处理：撕毁警徽（当在警徽移交阶段且没有选择目标时）
+  1152→    if (phase === "BADGE_TRANSFER" && selectedSeat === null && humanPlayer && gameState.badge.holderSeat === humanPlayer.seat) {
+  1153→      await handleHumanBadgeTransfer(BADGE_TRANSFER_TORN);
+  1154→      return;
+  1155→    }
+  1156→
+  1157→    // 特殊处理：猎人弃枪（当在猎人开枪阶段且没有选择目标时）
+  1158→    if (phase === "HUNTER_SHOOT" && selectedSeat === null && humanPlayer?.role === "Hunter") {
+  1159→      await handleNightAction(-1);
+  1160→      return;
+  1161→    }
+  1162→    
+  1163→    if (selectedSeat === null) return;
+  1164→    
+  1165→    // 保存选中的座位号，然后立即清除选择状态，避免确认对话框重新渲染
+  1166→    const targetSeat = selectedSeat;
+  1167→    setSelectedSeat(null);
+  1168→    
+  1169→    if (phase === "DAY_VOTE" || phase === "DAY_BADGE_ELECTION") {
+  1170→      await handleHumanVote(targetSeat);
+  1171→    } else if (phase === "BADGE_TRANSFER") {
+  1172→      await handleHumanBadgeTransfer(targetSeat);
+  1173→    } else if (
+  1174→      phase === "NIGHT_SEER_ACTION" ||
+  1175→      phase === "NIGHT_WOLF_ACTION" ||
+  1176→      phase === "NIGHT_GUARD_ACTION" ||
+  1177→      phase === "HUNTER_SHOOT" ||
+  1178→      phase === "WHITE_WOLF_KING_BOOM"
+  1179→    ) {
+  1180→      await handleNightAction(targetSeat);
+  1181→    }
+  1182→  }, [selectedSeat, gameState.phase, handleHumanVote, handleHumanBadgeTransfer, handleNightAction, isRoleRevealOpen, humanPlayer, gameState.badge.holderSeat]);
+  1183→
+  1184→  const handleNightActionConfirm = useCallback(async (targetSeat: number, actionType?: "save" | "poison" | "pass") => {
+  1185→    if (isRoleRevealOpen) return;
+  1186→    await handleNightAction(targetSeat, actionType);
+  1187→    setSelectedSeat(null);
+  1188→  }, [handleNightAction, isRoleRevealOpen]);
+  1189→
+  1190→  // 玩家列表（包含人类玩家）
+  1191→  const allPlayers = useMemo(() => {
+  1192→    return gameState.players;
+  1193→  }, [gameState.players]);
+  1194→
+  1195→  const leftPlayers = useMemo(() => allPlayers.slice(0, Math.ceil(allPlayers.length / 2)), [allPlayers]);
+  1196→  const rightPlayers = useMemo(() => allPlayers.slice(Math.ceil(allPlayers.length / 2)), [allPlayers]);
+  1197→
+  1198→  // 获取阶段描述
+  1199→  const getPhaseDescription = useCallback(() => {
+  1200→    const config = PHASE_CONFIGS[gameState.phase];
+  1201→    if (config.humanDescription) {
+  1202→      return config.humanDescription(humanPlayer, gameState);
+  1203→    }
+  1204→    return t(config.description as Parameters<typeof t>[0]);
+  1205→  }, [gameState, humanPlayer, t]);
+  1206→
+  1207→  const needsHumanAction = useMemo(() => {
+  1208→    return PHASE_CONFIGS[gameState.phase].requiresHumanInput(humanPlayer, gameState);
+  1209→  }, [gameState.phase, humanPlayer, gameState]);
+  1210→
+  1211→  const showWaitingIndicator = isWaitingForAI && !needsHumanAction;
+  1212→
+  1213→  const hasSelectableTargets = useMemo(() => {
+  1214→    return allPlayers.some((player) => canClickSeat(player));
+  1215→  }, [allPlayers, canClickSeat]);
+  1216→
+  1217→  const isSelectionPhase = useMemo(() => {
+  1218→    const actionType = PHASE_CONFIGS[gameState.phase].actionType;
+  1219→    const needsHumanActionNow = PHASE_CONFIGS[gameState.phase].requiresHumanInput(humanPlayer, gameState);
+  1220→    if (actionType === "vote" || actionType === "night_action") return needsHumanActionNow;
+  1221→    if (actionType === "special") return needsHumanActionNow && hasSelectableTargets;
+  1222→    return false;
+  1223→  }, [gameState, gameState.phase, hasSelectableTargets, humanPlayer]);
+  1224→
+  1225→  const renderPhaseIcon = () => {
+  1226→    switch (gameState.phase) {
+  1227→      case "NIGHT_SEER_ACTION":
+  1228→        return <Eye size={14} />;
+  1229→      case "NIGHT_WOLF_ACTION":
+  1230→        return <Skull size={14} />;
+  1231→      case "NIGHT_GUARD_ACTION":
+  1232→        return <Shield size={14} />;
+  1233→      case "NIGHT_WITCH_ACTION":
+  1234→        return <Drop size={14} />;
+  1235→      case "HUNTER_SHOOT":
+  1236→        return <Crosshair size={14} />;
+  1237→      case "DAY_SPEECH":
+  1238→        return <SpeechIcon size={14} />;
+  1239→      case "DAY_BADGE_SIGNUP":
+  1240→        return <Users size={14} />;
+  1241→      case "DAY_BADGE_ELECTION":
+  1242→        return <Users size={14} />;
+  1243→      case "DAY_VOTE":
+  1244→        return <Users size={14} />;
+  1245→      default:
+  1246→        return visualIsNight ? <NightIcon size={14} /> : <DayIcon size={14} />;
+  1247→    }
+  1248→  };
+  1249→
+  1250→  // ============ 渲染 ==========
+  1251→
+  1252→  // 欢迎阶段：未开始游戏时显示欢迎屏
+  1253→  const isWelcomeStage = !gameStarted;
+  1254→
+  1255→  return (
+  1256→    <div className="h-screen flex flex-col overflow-hidden bg-transparent">
+  1257→      <GameBackground isNight={visualIsNight} isBlinking={!!dayNightBlinkPhase} />
+  1258→
+  1259→      <motion.div
+  1260→        className="wc-blink-underlay"
+  1261→        initial={false}
+  1262→        animate={{
+  1263→          opacity: dayNightBlinkPhase === "closing" ? 0.9 : dayNightBlinkPhase === "opening" ? 0.45 : 0,
+  1264→        }}
+  1265→        transition={
+  1266→          dayNightBlinkPhase === "closing"
+  1267→            ? { duration: DAY_NIGHT_BLINK.closeMs / 1000, ease: [0.22, 0.72, 0.24, 1] }
+  1268→            : dayNightBlinkPhase === "opening"
+  1269→              ? { duration: DAY_NIGHT_BLINK.openMs / 1000, ease: [0.16, 0.84, 0.44, 1] }
+  1270→              : { duration: 0.2 }
+  1271→        }
+  1272→      />
+  1273→
+  1274→      <motion.div
+  1275→        className="wc-eyelid-overlay"
+  1276→        style={{
+  1277→          [WC_EYE_FEATHER_VAR]: 16,
+  1278→        } as CSSProperties}
+  1279→        initial={false}
+  1280→        animate={{
+  1281→          opacity: dayNightBlinkPhase ? 1 : 0,
+  1282→          [WC_LID_VAR]: dayNightBlinkPhase === "closing" ? 1 : 0,
+  1283→        } as unknown as TargetAndTransition}
+  1284→        transition={
+  1285→          dayNightBlinkPhase === "closing"
+  1286→            ? { duration: DAY_NIGHT_BLINK.closeMs / 1000, ease: [0.22, 0.72, 0.24, 1] }
+  1287→            : dayNightBlinkPhase === "opening"
+  1288→              ? { duration: DAY_NIGHT_BLINK.openMs / 1000, ease: [0.16, 0.84, 0.44, 1] }
+  1289→              : { duration: 0.2 }
+  1290→        }
+  1291→      />
+  1292→
+  1293→      <AnimatePresence mode="wait" initial={false}>
+  1294→        {isWelcomeStage ? (
+  1295→          <motion.div
+  1296→            key="welcome-stage"
+  1297→            initial={{ opacity: 0, y: 10, filter: "blur(10px)" }}
+  1298→            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+  1299→            exit={{ opacity: 0, y: -10, filter: "blur(10px)" }}
+  1300→            transition={{ duration: 0.45, ease: "easeOut" }}
+  1301→            className="h-full w-full"
+  1302→          >
+  1303→            <WelcomeScreen
+  1304→              humanName={humanName}
+  1305→              setHumanName={setHumanName}
+  1306→              onStart={(options) => {
+  1307→                setAiVoiceEnabled(false);
+  1308→                startGame({ ...(options ?? {}), isGenshinMode, isSpectatorMode });
+  1309→              }}
+  1310→              onAbort={restartGame}
+  1311→              isLoading={isLoading}
+  1312→              isGenshinMode={isGenshinMode}
+  1313→              onGenshinModeChange={setGenshinMode}
+  1314→              isSpectatorMode={isSpectatorMode}
+  1315→              onSpectatorModeChange={setSpectatorMode}
+  1316→              bgmVolume={bgmVolume}
+  1317→              isSoundEnabled={isSoundEnabled}
+  1318→              isAiVoiceEnabled={isAiVoiceEnabled}
+  1319→              isAutoAdvanceDialogueEnabled={isAutoAdvanceDialogueEnabled}
+  1320→              onBgmVolumeChange={setBgmVolume}
+  1321→              onSoundEnabledChange={setSoundEnabled}
+  1322→              onAiVoiceEnabledChange={setAiVoiceEnabled}
+  1323→              onAutoAdvanceDialogueEnabledChange={setAutoAdvanceDialogueEnabled}
+  1324→            />
+  1325→          </motion.div>
+  1326→        ) : (
+  1327→          <motion.div
+  1328→            key="game-stage"
+  1329→            initial={{ opacity: 0, y: 10, filter: "blur(10px)" }}
+  1330→            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+  1331→            exit={{ opacity: 0, y: -10, filter: "blur(10px)" }}
+  1332→            transition={{ duration: 0.45, ease: "easeOut" }}
+  1333→            className="h-full w-full flex flex-col overflow-hidden"
+  1334→          >
+  1335→            <AnimatePresence>
+  1336→              {ritualCue && !isRoleRevealOpen && showTable && (
+  1337→                <motion.div
+  1338→                  key={`ritual-${ritualCue.id}`}
+  1339→                  className="fixed inset-0 z-[55] pointer-events-none flex items-center justify-center"
+  1340→                  initial={{ opacity: 0 }}
+  1341→                  animate={{ opacity: 1 }}
+  1342→                  exit={{ opacity: 0 }}
+  1343→                  transition={{ duration: 0.22 }}
+  1344→                >
+  1345→                  <motion.div
+  1346→                    initial={{ opacity: 0, y: 12, scale: 0.995, filter: "blur(10px)" }}
+  1347→                    animate={{
+  1348→                      opacity: [0, 1, 1, 0],
+  1349→                      y: [12, 0, 0, -10],
+  1350→                      scale: [0.995, 1, 1, 0.995],
+  1351→                      filter: ["blur(10px)", "blur(0px)", "blur(0px)", "blur(12px)"],
+  1352→                    }}
+  1353→                    transition={{ duration: RITUAL_CUE_DURATION_SECONDS, times: [0, 0.15, 0.82, 1], ease: "easeInOut" }}
+  1354→                    onAnimationComplete={() => {
+  1355→                      const finishedId = ritualCue.id;
+  1356→                      setRitualCue(null);
+  1357→                      window.setTimeout(() => {
+  1358→                        const queued = ritualCueQueueRef.current;
+  1359→                        const next = queued.shift();
+  1360→                        if (next) {
+  1361→                          setRitualCue((current) => (current ? current : next));
+  1362→                          return;
+  1363→                        }
+  1364→                        setLastRitualMessageId((current) => (current ?? finishedId));
+  1365→                      }, 0);
+  1366→                    }}
+  1367→                    className="relative px-10 py-6 text-center"
+  1368→                  >
+  1369→                    <div
+  1370→                      className="absolute inset-0 -z-10"
+  1371→                      style={{
+  1372→                        background:
+  1373→                          "radial-gradient(circle at 50% 50%, rgba(184,134,11,0.18) 0%, rgba(184,134,11,0.10) 35%, rgba(0,0,0,0) 70%)",
+  1374→                        filter: "blur(0.5px)",
+  1375→                      }}
+  1376→                    />
+  1377→
+  1378→                    <motion.div
+  1379→                      className="mx-auto h-px w-40"
+  1380→                      initial={{ opacity: 0, scaleX: 0.75 }}
+  1381→                      animate={{ opacity: 1, scaleX: 1 }}
+  1382→                      transition={{ duration: 0.5, ease: "easeOut" }}
+  1383→                      style={{ background: "linear-gradient(90deg, transparent, rgba(184,134,11,0.55), transparent)" }}
+  1384→                    />
+  1385→
+  1386→                    <div
+  1387→                      className="mt-4 text-2xl md:text-3xl font-black tracking-tight font-serif text-[var(--text-primary)]"
+  1388→                      style={{
+  1389→                        textShadow:
+  1390→                          "0 2px 14px rgba(0,0,0,0.35), 0 0 22px rgba(184,134,11,0.22)",
+  1391→                      }}
+  1392→                    >
+  1393→                      {ritualCue.title}
+  1394→                    </div>
+  1395→
+  1396→                    {ritualCue.subtitle && (
+  1397→                      <div
+  1398→                        className="mt-2 text-sm text-[var(--text-secondary)]"
+  1399→                        style={{ textShadow: "0 2px 10px rgba(0,0,0,0.30)" }}
+  1400→                      >
+  1401→                        {ritualCue.subtitle}
+  1402→                      </div>
+  1403→                    )}
+  1404→
+  1405→                    <motion.div
+  1406→                      className="mx-auto mt-4 h-px w-40"
+  1407→                      initial={{ opacity: 0, scaleX: 0.75 }}
+  1408→                      animate={{ opacity: 1, scaleX: 1 }}
+  1409→                      transition={{ duration: 0.5, ease: "easeOut" }}
+  1410→                      style={{ background: "linear-gradient(90deg, transparent, rgba(184,134,11,0.35), transparent)" }}
+  1411→                    />
+  1412→                  </motion.div>
+  1413→                </motion.div>
+  1414→              )}
+  1415→            </AnimatePresence>
+  1416→
+  1417→            {humanPlayer && (
+  1418→              <RoleRevealOverlay
+  1419→                open={isRoleRevealOpen}
+  1420→                player={humanPlayer}
+  1421→                phase={gameState.phase}
+  1422→                onContinue={async () => {
+  1423→                  setIsRoleRevealOpen(false);
+  1424→                  await continueAfterRoleReveal();
+  1425→                }}
+  1426→              />
+  1427→            )}
+  1428→
+  1429→            <NightActionOverlay overlay={nightActionOverlay} />
+  1430→
+  1431→            <TutorialOverlay
+  1432→              open={isTutorialOpen}
+  1433→              tutorial={activeTutorial}
+  1434→              onOpenChange={handleTutorialOpenChange}
+  1435→              autoPromptEnabled={tutorialState.enabled}
+  1436→              onAutoPromptChange={setAutoPromptEnabled}
+  1437→            />
+  1438→
+  1439→            {showTable && (
+  1440→              <div className="wc-topbar wc-topbar--responsive shrink-0 transition-all duration-300">
+  1441→                {/* 移动端第一行：Logo + 设置按钮 */}
+  1442→                <div className="wc-topbar__row-1 flex items-center justify-between w-full md:w-auto md:contents">
+  1443→                  <div className="wc-topbar__title">
+  1444→                    <WerewolfIcon size={22} className="text-[var(--color-blood)]" />
+  1445→                    <span>WOLFCHA</span>
+  1446→                  </div>
+  1447→
+  1448→                  {/* 移动端设置按钮 - 只显示图标 */}
+  1449→                  <button
+  1450→                    type="button"
+  1451→                    onClick={() => setIsSettingsOpen(true)}
+  1452→                    title={t("page.audioSettings")}
+  1453→                    aria-label={t("page.audioSettings")}
+  1454→                    className="md:hidden inline-flex items-center justify-center w-8 h-8 rounded-md border border-[var(--border-color)] bg-[var(--bg-card)] text-[var(--text-primary)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-accent-bg)]"
+  1455→                  >
+  1456→                    <GearSix size={16} />
+  1457→                  </button>
+  1458→                </div>
+  1459→
+  1460→                <div className="wc-topbar__info">
+  1461→                  <div className="wc-topbar__item">
+  1462→                    <span className="text-xs uppercase tracking-wider opacity-60">Day</span>
+  1463→                    <span className="font-serif text-lg font-bold">{String(gameState.day).padStart(2, '0')}</span>
+  1464→                  </div>
+  1465→                  <div className="wc-topbar__item">
+  1466→                    <span className="text-xs uppercase tracking-wider opacity-60">Alive</span>
+  1467→                    <span className="font-serif text-lg font-bold">{gameState.players.filter((p) => p.alive).length}/{gameState.players.length}</span>
+  1468→                  </div>
+  1469→                  {gameState.badge.holderSeat !== null && (
+  1470→                    <div className="wc-topbar__item">
+  1471→                      <span className="text-xs uppercase tracking-wider opacity-60">{t("page.badgeLabel")}</span>
+  1472→                      <span className="font-serif text-lg font-bold text-[var(--color-gold)]">
+  1473→                        {t("mentions.seatLabel", { seat: gameState.badge.holderSeat + 1 })}
+  1474→                      </span>
+  1475→                    </div>
+  1476→                  )}
+  1477→                  <div className="wc-phase-badge">
+  1478→                    <span className="opacity-90">{renderPhaseIcon()}</span>
+  1479→                    <span>{getPhaseDescription()}</span>
+  1480→                    {showWaitingIndicator && (
+  1481→                      <span className="flex items-center gap-1 ml-1">
+  1482→                        <motion.span animate={{ scale: [1, 1.25, 1] }} transition={{ repeat: Infinity, duration: 0.7, delay: 0 }} className="w-1.5 h-1.5 rounded-full bg-current" />
+  1483→                        <motion.span animate={{ scale: [1, 1.25, 1] }} transition={{ repeat: Infinity, duration: 0.7, delay: 0.15 }} className="w-1.5 h-1.5 rounded-full bg-current" />
+  1484→                        <motion.span animate={{ scale: [1, 1.25, 1] }} transition={{ repeat: Infinity, duration: 0.7, delay: 0.3 }} className="w-1.5 h-1.5 rounded-full bg-current" />
+  1485→                      </span>
+  1486→                    )}
+  1487→                    {needsHumanAction && (
+  1488→                      <span className="flex items-center gap-1.5 font-semibold text-xs px-2 py-0.5 rounded-full ml-1 bg-[var(--color-gold)]/20 text-[var(--color-gold)]">
+  1489→                        <span className="w-1.5 h-1.5 bg-current rounded-full animate-pulse" />
+  1490→                        {t("ui.waitingAction")}
+  1491→                      </span>
+  1492→                    )}
+  1493→                  </div>
+  1494→                </div>
+  1495→
+  1496→                {/* 桌面端右侧区域 */}
+  1497→                <div className="hidden md:flex items-center gap-3">
+  1498→                  <div className="wc-topbar__item wc-topbar__item--role">
+  1499→                    <span className="text-xs uppercase tracking-wider opacity-60">{t("page.roleLabel")}</span>
+  1500→                    <span className="font-bold text-[var(--color-gold)]">
+  1501→                      {canShowRole ? getRoleLabel(humanPlayer?.role) : t("page.rolePending")}
+  1502→                    </span>
+  1503→                  </div>
+  1504→                  <button
+  1505→                    type="button"
+  1506→                    onClick={() => setIsSettingsOpen(true)}
+  1507→                    title={t("page.audioSettings")}
+  1508→                    aria-label={t("page.audioSettings")}
+  1509→                    className="inline-flex items-center gap-2 rounded-md border-2 border-[var(--border-color)] bg-[var(--bg-card)] px-2.5 py-1 text-xs text-[var(--text-primary)] transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-accent-bg)]"
+  1510→                  >
+  1511→                    <GearSix size={16} />
+  1512→                    {t("page.settings")}
+  1513→                  </button>
+  1514→                </div>
+  1515→              </div>
+  1516→            )}
+  1517→
+  1518→            <div className="flex flex-1 overflow-hidden">
+  1519→              <div className="flex-1 flex flex-col bg-transparent min-h-0 overflow-hidden">
+  1520→                <AnimatePresence mode="wait" initial={false}>
+  1521→                  {(
+  1522→                    <motion.div
+  1523→                      key="table-screen"
+  1524→                      initial={{ opacity: 0, y: 10, filter: "blur(10px)" }}
+  1525→                      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+  1526→                      exit={{ opacity: 0, y: -10, filter: "blur(10px)" }}
+  1527→                      transition={{ duration: 0.45, ease: "easeOut" }}
+  1528→                      className="flex-1 flex flex-col min-h-0 overflow-hidden"
+  1529→                    >
+  1530→                {/* 主布局 - 严格对齐 style-unification-preview.html */}
+  1531→                <div className="flex-1 flex gap-4 lg:gap-6 lg:px-6 lg:py-6 overflow-hidden w-full justify-center min-h-0">
+  1532→                  {/* 左侧玩家卡片 */}
+  1533→                  <div className="hidden md:flex w-[220px] lg:w-[240px] xl:w-[260px] 2xl:w-[300px] flex-col gap-3 shrink-0 overflow-y-auto overflow-x-visible scrollbar-hide pt-2 pb-2 px-1 -mx-1">
+  1534→                    <AnimatePresence>
+  1535→                      {leftPlayers.map((player, index) => {
+  1536→                        const checkResult =
+  1537→                          humanPlayer?.role === "Seer"
+  1538→                            ? gameState.nightActions.seerHistory?.find((h) => h.targetSeat === player.seat)
+  1539→                            : undefined;
+  1540→                        const seerResult = checkResult ? (checkResult.isWolf ? "wolf" : "good") : null;
+  1541→                        const isBadgeCandidate = (gameState.phase === "DAY_BADGE_ELECTION" || gameState.phase === "DAY_BADGE_SPEECH") && 
+  1542→                          (gameState.badge.candidates || []).includes(player.seat);
+  1543→
+  1544→                        return (
+  1545→                          <PlayerCardCompact
+  1546→                            key={player.playerId}
+  1547→                            player={player}
+  1548→                            isSpeaking={gameState.currentSpeakerSeat === player.seat}
+  1549→                            canClick={canClickSeat(player)}
+  1550→                            isSelected={selectedSeat === player.seat}
+  1551→                            onClick={() => handleSeatClick(player)}
+  1552→                            onDetailClick={isSelectionPhase ? undefined : () => setDetailPlayer(player)}
+  1553→                            animationDelay={index * 0.05}
+  1554→                            isNight={visualIsNight}
+  1555→                            isGenshinMode={gameState?.isGenshinMode ?? isGenshinMode}
+  1556→                            humanPlayer={humanPlayer}
+  1557→                            seerCheckResult={seerResult}
+  1558→                            isBadgeHolder={gameState.badge.holderSeat === player.seat}
+  1559→                            isBadgeCandidate={isBadgeCandidate}
+  1560→                            showRoleBadge={canShowRole}
+  1561→                            showModel={gameState.phase === "GAME_END"}
+  1562→                            selectionTone={selectionTone}
+  1563→                            isInSelectionPhase={isSelectionPhase}
+  1564→                          />
+  1565→                        );
+  1566→                      })}
+  1567→                    </AnimatePresence>
+  1568→                  </div>
+  1569→
+  1570→                  {/* 中间区域：对话区 */}
+  1571→                  <div className="flex-1 flex flex-col min-w-0 min-h-0 h-full max-w-[980px] lg:max-w-[1100px] xl:max-w-[1200px] 2xl:max-w-[1280px] overflow-hidden">
+  1572→                    <DialogArea
+  1573→                      gameState={gameState}
+  1574→                      humanPlayer={humanPlayer}
+  1575→                      isNight={visualIsNight}
+  1576→                      isSoundEnabled={isSoundEnabled}
+  1577→                      isAiVoiceEnabled={shouldUseAiVoice}
+  1578→                      currentDialogue={currentDialogue}
+  1579→                      displayedText={displayedText}
+  1580→                      isTyping={isTyping}
+  1581→                      onAdvanceDialogue={handleAdvanceDialogue}
+  1582→                      isHumanTurn={(gameState.phase === "DAY_SPEECH" || gameState.phase === "DAY_LAST_WORDS" || gameState.phase === "DAY_BADGE_SPEECH" || gameState.phase === "DAY_PK_SPEECH") && gameState.currentSpeakerSeat === humanPlayer?.seat && !waitingForNextRound}
+  1583→                      waitingForNextRound={waitingForNextRound}
+  1584→                      tutorialHelpLabel={tutorialHelpLabel}
+  1585→                      showTutorialHelp={showTutorialHelp}
+  1586→                      onTutorialOpen={handleTutorialHelpOpen}
+  1587→                      inputText={inputText}
+  1588→                      onInputChange={setInputText}
+  1589→                      onSendMessage={handleHumanSpeech}
+  1590→                      onFinishSpeaking={handleFinishSpeaking}
+  1591→                      selectedSeat={selectedSeat}
+  1592→                      isWaitingForAI={isWaitingForAI}
+  1593→                      onConfirmAction={confirmSelectedSeat}
+  1594→                      onCancelSelection={() => setSelectedSeat(null)}
+  1595→                      onNightAction={handleNightActionConfirm}
+  1596→                      onBadgeSignup={handleBadgeSignup}
+  1597→                      onRestart={restartGame}
+  1598→                      onWhiteWolfKingBoom={handleWhiteWolfKingBoom}
+  1599→                      onViewAnalysis={handleViewAnalysis}
+  1600→                      isAnalysisLoading={isAnalysisLoading}
+  1601→                      isEventLogOpen={isEventLogOpen}
+  1602→                      onEventLogOpenChange={setIsEventLogOpen}
+  1603→                    />
+  1604→
+  1605→                    {/* 移动端玩家条 */}
+  1606→                    <div className="wc-mobile-player-bar md:hidden">
+  1607→                      <div className="wc-mobile-player-bar__track">
+  1608→                        {allPlayers.map((player, index) => {
+  1609→                          const checkResult =
+  1610→                            humanPlayer?.role === "Seer"
+  1611→                              ? gameState.nightActions.seerHistory?.find((h) => h.targetSeat === player.seat)
+  1612→                              : undefined;
+  1613→                          const seerResult = checkResult ? (checkResult.isWolf ? "wolf" : "good") : null;
+  1614→                          const isBadgeCandidate = (gameState.phase === "DAY_BADGE_ELECTION" || gameState.phase === "DAY_BADGE_SPEECH") &&
+  1615→                            (gameState.badge.candidates || []).includes(player.seat);
+  1616→
+  1617→                          return (
+  1618→                            <PlayerCardCompact
+  1619→                              key={player.playerId}
+  1620→                              player={player}
+  1621→                              isSpeaking={gameState.currentSpeakerSeat === player.seat}
+  1622→                              canClick={canClickSeat(player)}
+  1623→                              isSelected={selectedSeat === player.seat}
+  1624→                              onClick={() => handleSeatClick(player)}
+  1625→                              onDetailClick={isSelectionPhase ? undefined : () => setDetailPlayer(player)}
+  1626→                              animationDelay={index * 0.02}
+  1627→                              isNight={visualIsNight}
+  1628→                              isGenshinMode={gameState?.isGenshinMode ?? isGenshinMode}
+  1629→                              humanPlayer={humanPlayer}
+  1630→                              seerCheckResult={seerResult}
+  1631→                              isBadgeHolder={gameState.badge.holderSeat === player.seat}
+  1632→                              isBadgeCandidate={isBadgeCandidate}
+  1633→                              variant="mobile"
+  1634→                              showRoleBadge={canShowRole}
+  1635→                              selectionTone={selectionTone}
+  1636→                              isInSelectionPhase={isSelectionPhase}
+  1637→                            />
+  1638→                          );
+  1639→                        })}
+  1640→                      </div>
+  1641→                    </div>
+  1642→                  </div>
+  1643→
+  1644→                  {/* 右侧玩家卡片 */}
+  1645→                  <div className="hidden md:flex w-[220px] lg:w-[240px] xl:w-[260px] 2xl:w-[300px] flex-col gap-3 shrink-0 overflow-y-auto overflow-x-visible scrollbar-hide pt-2 pb-2 px-1 -mx-1">
+  1646→                    <AnimatePresence>
+  1647→                      {rightPlayers.map((player, index) => {
+  1648→                        const checkResult =
+  1649→                          humanPlayer?.role === "Seer"
+  1650→                            ? gameState.nightActions.seerHistory?.find((h) => h.targetSeat === player.seat)
+  1651→                            : undefined;
+  1652→                        const seerResult = checkResult ? (checkResult.isWolf ? "wolf" : "good") : null;
+  1653→                        const isBadgeCandidate = (gameState.phase === "DAY_BADGE_ELECTION" || gameState.phase === "DAY_BADGE_SPEECH") && 
+  1654→                          (gameState.badge.candidates || []).includes(player.seat);
+  1655→
+  1656→                        return (
+  1657→                          <PlayerCardCompact
+  1658→                            key={player.playerId}
+  1659→                            player={player}
+  1660→                            isSpeaking={gameState.currentSpeakerSeat === player.seat}
+  1661→                            canClick={canClickSeat(player)}
+  1662→                            isSelected={selectedSeat === player.seat}
+  1663→                            onClick={() => handleSeatClick(player)}
+  1664→                            onDetailClick={isSelectionPhase ? undefined : () => setDetailPlayer(player)}
+  1665→                            animationDelay={index * 0.05}
+  1666→                            isNight={visualIsNight}
+  1667→                            isGenshinMode={gameState?.isGenshinMode ?? isGenshinMode}
+  1668→                            humanPlayer={humanPlayer}
+  1669→                            seerCheckResult={seerResult}
+  1670→                            isBadgeHolder={gameState.badge.holderSeat === player.seat}
+  1671→                            isBadgeCandidate={isBadgeCandidate}
+  1672→                            showRoleBadge={canShowRole}
+  1673→                            showModel={gameState.phase === "GAME_END"}
+  1674→                            selectionTone={selectionTone}
+  1675→                            isInSelectionPhase={isSelectionPhase}
+  1676→                          />
+  1677→                        );
+  1678→                      })}
+  1679→                    </AnimatePresence>
+  1680→                  </div>
+  1681→                </div>
+  1682→              </motion.div>
+  1683→            )}
+  1684→          </AnimatePresence>
+  1685→        </div>
+  1686→      </div>
+  1687→    </motion.div>
+  1688→  )}
+  1689→</AnimatePresence>
+  1690→
+  1691→      {/* 笔记本悬浮按钮 - 参考 style-unification-preview.html */}
+  1692→      <button
+  1693→        onClick={() => {
+  1694→          setIsNotebookOpen((v) => !v);
+  1695→          setIsEventLogOpen(false);
+  1696→        }}
+  1697→        className="wc-notebook-fab"
+  1698→        title={isNotebookOpen ? t("page.closeNotebook") : t("page.openNotebook")}
+  1699→        type="button"
+  1700→      >
+  1701→        {isNotebookOpen ? <X size={24} /> : <NotePencil size={24} />}
+  1702→      </button>
+  1703→
+  1704→      <AnimatePresence>
+  1705→        {isNotebookOpen && (
+  1706→          <motion.div
+  1707→            key="notebook-panel"
+  1708→            initial={isMobile ? { opacity: 0, y: 24 } : { opacity: 0, x: 24, y: 12, scale: 0.98 }}
+  1709→            animate={isMobile ? { opacity: 1, y: 0 } : { opacity: 1, x: 0, y: 0, scale: 1 }}
+  1710→            exit={isMobile ? { opacity: 0, y: 24 } : { opacity: 0, x: 24, y: 12, scale: 0.98 }}
+  1711→            transition={{ type: "spring", stiffness: 400, damping: 30 }}
+  1712→            className="wc-notebook-panel fixed bottom-20 right-5 z-50 w-[360px] h-[480px] max-h-[70vh]"
+  1713→          >
+  1714→            <div className="h-full rounded-t-2xl md:rounded-lg overflow-hidden border shadow-2xl glass-panel glass-panel--strong">
+  1715→              <Notebook />
+  1716→            </div>
+  1717→          </motion.div>
+  1718→        )}
+  1719→      </AnimatePresence>
+  1720→
+  1721→      {/* 玩家详情弹窗 */}
+  1722→      <PlayerDetailModal
+  1723→        player={detailPlayer}
+  1724→        isOpen={detailPlayer !== null}
+  1725→        onClose={() => setDetailPlayer(null)}
+  1726→        humanPlayer={humanPlayer}
+  1727→        isGenshinMode={gameState?.isGenshinMode ?? isGenshinMode}
+  1728→        isSpectatorMode={gameState?.isSpectatorMode ?? false}
+  1729→      />
+  1730→
+  1731→      <SettingsModal
+  1732→        open={isSettingsOpen}
+  1733→        onOpenChange={setIsSettingsOpen}
+  1734→        bgmVolume={bgmVolume}
+  1735→        isSoundEnabled={isSoundEnabled}
+  1736→        isAiVoiceEnabled={isAiVoiceEnabled}
+  1737→        isAutoAdvanceDialogueEnabled={isAutoAdvanceDialogueEnabled}
+  1738→        gameState={gameState}
+  1739→        onBgmVolumeChange={setBgmVolume}
+  1740→        onSoundEnabledChange={setSoundEnabled}
+  1741→        onAiVoiceEnabledChange={setAiVoiceEnabled}
+  1742→        onAutoAdvanceDialogueEnabledChange={setAutoAdvanceDialogueEnabled}
+  1743→        isGameInProgress={gameInProgress}
+  1744→        onExitGame={restartGame}
+  1745→      />
+  1746→
+  1747→      {/* 开发者模式 - 只在游戏开始后显示 */}
+  1748→      {showTable && showDevTools && (
+  1749→        <>
+  1750→          <DevModeButton onClick={() => setIsDevConsoleOpen(true)} />
+  1751→          <DevConsole isOpen={isDevConsoleOpen} onClose={() => setIsDevConsoleOpen(false)} />
+  1752→        </>
+  1753→      )}
+  1754→    </div>
+  1755→  );
+  1756→}
+  1757→
