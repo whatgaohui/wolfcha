@@ -52,7 +52,7 @@ function getModelRefForModel(model: string): ModelRef {
   return (
     PROJECT_MODELS.find((ref) => ref.model === model) ??
     ALL_MODELS.find((ref) => ref.model === model) ??
-    { provider: "zenmux" as const, model }
+    { provider: "zai" as const, model }
   );
 }
 

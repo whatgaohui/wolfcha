@@ -1,10 +1,4 @@
-import {
-  getDashscopeApiKey,
-  getTokendanceApiKey,
-  getTokendanceBaseUrl,
-  getZenmuxApiKey,
-  isCustomKeyEnabled,
-} from "@/lib/api-keys";
+import { isCustomKeyEnabled } from "@/lib/api-keys";
 import { ALL_MODELS, AVAILABLE_MODELS, PROJECT_MODELS, type ModelRef } from "@/types/game";
 import { gameStatsTracker } from "@/hooks/useGameStats";
 import { gameSessionTracker } from "@/lib/game-session-tracker";
@@ -24,7 +18,7 @@ export interface LLMMessage {
   reasoning_details?: unknown;
 }
 
-type Provider = "zenmux" | "dashscope" | "tokendance";
+type Provider = "zai";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -35,7 +29,7 @@ function getProviderForModel(model: string): Provider {
    const modelRef =
      ALL_MODELS.find((ref) => ref.model === model) ??
      PROJECT_MODELS.find((ref) => ref.model === model);
-   return modelRef?.provider ?? "zenmux";
+   return modelRef?.provider ?? "zai";
  }
 
 // When using built-in keys (custom disabled), only project-key models are allowed.
@@ -44,37 +38,18 @@ function getProviderForModel(model: string): Provider {
 function resolveModelForBuiltin(model: string): string {
   if (PROJECT_MODELS.some((r) => r.model === model)) return model;
   const m =
-    AVAILABLE_MODELS.find((r) => r.provider === "zenmux") ?? AVAILABLE_MODELS[0];
+    AVAILABLE_MODELS.find((r) => r.provider === "zai") ?? AVAILABLE_MODELS[0];
   return m?.model ?? model;
 }
 
 export function resolveApiKeySource(model: string): ApiKeySource {
-   const customEnabled = isCustomKeyEnabled();
-   if (!customEnabled) return "project";
-
-   const provider = getProviderForModel(model);
-   if (provider === "dashscope") {
-     return getDashscopeApiKey() ? "user" : "project";
-   }
-   if (provider === "tokendance") {
-     return getTokendanceApiKey() && getTokendanceBaseUrl() ? "user" : "project";
-   }
-   return getZenmuxApiKey() ? "user" : "project";
+   // z.ai SDK manages credentials internally — always "project".
+   return "project";
  }
 
-function buildCustomKeyHeaders(customEnabled: boolean): Record<string, string> {
-  if (!customEnabled) return {};
-
-  const zenmuxApiKey = getZenmuxApiKey();
-  const dashscopeApiKey = getDashscopeApiKey();
-  const tokendanceApiKey = getTokendanceApiKey();
-  const tokendanceBaseUrl = getTokendanceBaseUrl();
-  return {
-    ...(zenmuxApiKey ? { "X-Zenmux-Api-Key": zenmuxApiKey } : {}),
-    ...(dashscopeApiKey ? { "X-Dashscope-Api-Key": dashscopeApiKey } : {}),
-    ...(tokendanceApiKey ? { "X-Tokendance-Api-Key": tokendanceApiKey } : {}),
-    ...(tokendanceBaseUrl ? { "X-Tokendance-Base-Url": tokendanceBaseUrl } : {}),
-  };
+function buildCustomKeyHeaders(_customEnabled: boolean): Record<string, string> {
+  // z.ai SDK manages credentials internally — no custom headers needed.
+  return {};
 }
 
 export interface ChatCompletionResponse {
@@ -833,7 +808,7 @@ export async function generateJSON<T>(
   }
 
   const shouldForceJsonObject =
-    !options.response_format && getProviderForModel(options.model) === "zenmux";
+    !options.response_format && getProviderForModel(options.model) === "zai";
 
   const result = await generateCompletion({
     ...options,

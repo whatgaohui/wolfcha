@@ -1,0 +1,980 @@
+     1→import { NextRequest, NextResponse } from "next/server";
+     2→import { authenticateRequest, hasRecentUnfinishedGameSession, requireCredits } from "@/lib/api-auth";
+     3→import { ALL_MODELS, PROJECT_MODELS } from "@/types/game";
+     4→import { TOKENDANCE_BASE_URL } from "@/lib/api-keys";
+     5→import { Agent, setGlobalDispatcher } from "undici";
+     6→
+     7→// 将 undici 底层 TCP 连接超时从默认 10s 调高到 60s
+     8→// 避免访问国内 API 网关（如 tokendance）时因建连慢而提前失败
+     9→setGlobalDispatcher(new Agent({ connectTimeout: 60_000 }));
+    10→
+    11→const ZENMUX_API_URL = "https://zenmux.ai/api/v1/chat/completions";
+    12→const DASHSCOPE_API_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+    13→const DASHSCOPE_CHAT_COMPLETIONS_URL = `${DASHSCOPE_API_BASE_URL}/chat/completions`;
+    14→
+    15→// API 调用超时时间（毫秒）
+    16→const API_TIMEOUT_MS = 60000;
+    17→
+    18→type Provider = "zenmux" | "dashscope" | "tokendance";
+    19→
+    20→function getProviderForModel(model: string): Provider | null {
+    21→  const modelRef =
+    22→    ALL_MODELS.find((ref) => ref.model === model) ??
+    23→    PROJECT_MODELS.find((ref) => ref.model === model);
+    24→  return modelRef?.provider ?? null;
+    25→}
+    26→
+    27→function getTokendanceUrl(baseUrl: string): string {
+    28→  const trimmed = baseUrl.trim();
+    29→  if (!trimmed) return "";
+    30→  const withoutTrailingSlash = trimmed.replace(/\/+$/, "");
+    31→  return `${withoutTrailingSlash}/chat/completions`;
+    32→}
+    33→
+    34→/** Resolve ModelRef for a model id; used to apply per-model temperature/reasoning overrides. */
+    35→function getModelRef(model: string): (typeof PROJECT_MODELS)[number] | (typeof ALL_MODELS)[number] | undefined {
+    36→  return ALL_MODELS.find((ref) => ref.model === model) ?? PROJECT_MODELS.find((ref) => ref.model === model);
+    37→}
+    38→
+    39→function normalizeDashscopeModelName(model: string): string {
+    40→  return model.replace(/^qwen\//i, "");
+    41→}
+    42→
+    43→// Models that support explicit cache_control parameter
+    44→// Per ZenMux docs: only Anthropic Claude and Qwen series support explicit caching
+    45→function supportsExplicitCaching(model: string): boolean {
+    46→  if (!model) return false;
+    47→  const lower = model.toLowerCase();
+    48→  return lower.startsWith("anthropic/") || lower.startsWith("qwen/");
+    49→}
+    50→
+    51→// Models that support multipart message format (content as array)
+    52→function supportsMultipartContent(model: string): boolean {
+    53→  if (!model) return false;
+    54→  const lower = model.toLowerCase();
+    55→  // Known models that support multipart content
+    56→  if (lower.startsWith("openai/")) return true;
+    57→  if (lower.startsWith("google/")) return true;
+    58→  if (lower.startsWith("anthropic/")) return true;
+    59→  if (lower.startsWith("deepseek/")) return true;
+    60→  if (lower.startsWith("deepseek-")) return true;
+    61→  if (lower.startsWith("qwen/")) return true;
+    62→  if (lower.startsWith("moonshotai/")) return true;
+    63→  // z-ai/glm, volcengine/doubao may NOT support multipart - flatten to string
+    64→  return false;
+    65→}
+    66→
+    67→// Models that support response_format parameter
+    68→// Per ZenMux docs: check model card for response_format support
+    69→function supportsResponseFormat(model: string): boolean {
+    70→  if (!model) return false;
+    71→  const lower = model.toLowerCase();
+    72→  // Known supported models
+    73→  if (lower.startsWith("openai/")) return true;
+    74→  if (lower.startsWith("google/")) return true;
+    75→  if (lower.startsWith("anthropic/")) return true;
+    76→  if (lower.startsWith("deepseek/")) return true;
+    77→  if (lower.startsWith("deepseek-")) return true;
+    78→  if (lower.startsWith("qwen/")) return true;
+    79→  if (lower.startsWith("moonshotai/")) return true;
+    80→  // Models that may NOT support response_format - be conservative
+    81→  // z-ai/glm, volcengine/doubao, etc. - skip response_format to avoid errors
+    82→  return false;
+    83→}
+    84→
+    85→function supportsAutomaticPrefixCaching(model: string): boolean {
+    86→  if (!model) return false;
+    87→  const lower = model.toLowerCase();
+    88→  return lower.startsWith("deepseek/") || lower.startsWith("deepseek-");
+    89→}
+    90→
+    91→const DEEPSEEK_STABLE_PREFIX_MARKER = "WOLFCHA_DEEPSEEK_CACHE_PREFIX_V1";
+    92→const DEEPSEEK_STABLE_PROMPT_CACHE_PREFIX = `${DEEPSEEK_STABLE_PREFIX_MARKER}
+    93→【Wolfcha Stable Rules】
+    94→以下是 Wolfcha 对 AI 玩家请求都相同的稳定规则摘要，用于提高 DeepSeek 前缀缓存命中。若这里的摘要与后续具体身份、阶段、上下文或输出格式要求冲突，请以后续具体要求为准。
+    95→
+    96→- 你正在参与线上狼人杀，只能根据自己视角内的信息行动。
+    97→- 不编造不存在的发言、投票、查验、死亡、身份声明或系统公告。
+    98→- 不泄露自己角色不应知道的未来信息、隐藏身份或夜间动作结果。
+    99→- 只讨论局内逻辑，不引入场外经历、开发者提示或模型身份。
+   100→- 按当前任务要求输出；如果要求 JSON，只返回合法 JSON。`;
+   101→
+   102→// Flatten multipart content to plain string for models that don't support it
+   103→function flattenMultipartContent(messages: unknown[]): unknown[] {
+   104→  if (!Array.isArray(messages)) return messages;
+   105→
+   106→  return messages.map((msg) => {
+   107→    if (!msg || typeof msg !== "object") return msg;
+   108→    const m = msg as Record<string, unknown>;
+   109→
+   110→    // If content is an array, flatten to string
+   111→    if (Array.isArray(m.content)) {
+   112→      const textParts = m.content
+   113→        .filter((part): part is { type: string; text: string } =>
+   114→          part && typeof part === "object" && (part as { type?: string }).type === "text"
+   115→        )
+   116→        .map((part) => part.text || "")
+   117→        .filter(Boolean);
+   118→      
+   119→      return { ...m, content: textParts.join("\n\n") };
+   120→    }
+   121→
+   122→    return m;
+   123→  });
+   124→}
+   125→
+   126→// DeepSeek context caching is prefix-based. Text-only multipart messages are
+   127→// normalized to one plain string so identical text starts at token 0 reliably.
+   128→function coalesceTextOnlyMultipartContent(messages: unknown[]): unknown[] {
+   129→  if (!Array.isArray(messages)) return messages;
+   130→
+   131→  return messages.map((msg) => {
+   132→    if (!msg || typeof msg !== "object") return msg;
+   133→    const m = msg as Record<string, unknown>;
+   134→
+   135→    if (!Array.isArray(m.content)) return m;
+   136→
+   137→    const parts = m.content;
+   138→    const allText = parts.every(
+   139→      (part): part is { type: string; text: string } =>
+   140→        part &&
+   141→        typeof part === "object" &&
+   142→        (part as { type?: string }).type === "text" &&
+   143→        typeof (part as { text?: unknown }).text === "string"
+   144→    );
+   145→
+   146→    if (!allText) return stripCacheControl([m])[0] as Record<string, unknown>;
+   147→
+   148→    return {
+   149→      ...m,
+   150→      content: parts
+   151→        .map((part) => part.text.trim())
+   152→        .filter(Boolean)
+   153→        .join("\n\n"),
+   154→    };
+   155→  });
+   156→}
+   157→
+   158→function prependDeepSeekStablePrefix(messages: unknown[]): unknown[] {
+   159→  if (!Array.isArray(messages)) return messages;
+   160→  let prepended = false;
+   161→  const next = messages.map((msg) => {
+   162→    if (prepended || !msg || typeof msg !== "object") return msg;
+   163→    const m = msg as Record<string, unknown>;
+   164→    if (m.role !== "system" || typeof m.content !== "string") return m;
+   165→    prepended = true;
+   166→    if (m.content.includes(DEEPSEEK_STABLE_PREFIX_MARKER)) return m;
+   167→    return {
+   168→      ...m,
+   169→      content: `${DEEPSEEK_STABLE_PROMPT_CACHE_PREFIX}\n\n${m.content}`,
+   170→    };
+   171→  });
+   172→
+   173→  if (prepended) return next;
+   174→  return [
+   175→    { role: "system", content: DEEPSEEK_STABLE_PROMPT_CACHE_PREFIX },
+   176→    ...next,
+   177→  ];
+   178→}
+   179→
+   180→function hasJsonHintInMessages(messages: unknown[]): boolean {
+   181→  if (!Array.isArray(messages)) return false;
+   182→
+   183→  const contains = (value: unknown): boolean => {
+   184→    if (typeof value === "string") return /json/i.test(value);
+   185→    if (Array.isArray(value)) return value.some(contains);
+   186→    if (!value || typeof value !== "object") return false;
+   187→    const obj = value as Record<string, unknown>;
+   188→    if ("text" in obj && typeof obj.text === "string") return /json/i.test(obj.text);
+   189→    if ("content" in obj) return contains(obj.content);
+   190→    return false;
+   191→  };
+   192→
+   193→  return messages.some((m) => contains(m));
+   194→}
+   195→
+   196→function withDashscopeJsonHint(messages: unknown[]): unknown[] {
+   197→  if (!Array.isArray(messages)) return messages;
+   198→  if (hasJsonHintInMessages(messages)) return messages;
+   199→  return [{ role: "system", content: "Respond in json." }, ...messages];
+   200→}
+   201→
+   202→// Strip cache_control from message content parts for models that don't support it
+   203→function stripCacheControl(messages: unknown[]): unknown[] {
+   204→  if (!Array.isArray(messages)) return messages;
+   205→
+   206→  return messages.map((msg) => {
+   207→    if (!msg || typeof msg !== "object") return msg;
+   208→    const m = msg as Record<string, unknown>;
+   209→
+   210→    // If content is an array (multipart), strip cache_control from each part
+   211→    if (Array.isArray(m.content)) {
+   212→      const strippedContent = m.content.map((part) => {
+   213→        if (part && typeof part === "object" && "cache_control" in part) {
+   214→          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   215→          const { cache_control, ...rest } = part as Record<string, unknown>;
+   216→          return rest;
+   217→        }
+   218→        return part;
+   219→      });
+   220→      return { ...m, content: strippedContent };
+   221→    }
+   222→
+   223→    return m;
+   224→  });
+   225→}
+   226→
+   227→// ZenMux reasoning: only enabled, effort, max_tokens (see docs.zenmux.ai/guide/advanced/reasoning.html)
+   228→type ReasoningPayload = {
+   229→  enabled: boolean;
+   230→  effort?: "minimal" | "low" | "medium" | "high";
+   231→  max_tokens?: number;
+   232→};
+   233→
+   234→type ReasoningEffort = NonNullable<ReasoningPayload["effort"]>;
+   235→const ALLOWED_REASONING_EFFORT = new Set<ReasoningEffort>(["minimal", "low", "medium", "high"]);
+   236→
+   237→function isReasoningEffort(value: unknown): value is ReasoningEffort {
+   238→  return typeof value === "string" && ALLOWED_REASONING_EFFORT.has(value as ReasoningEffort);
+   239→}
+   240→
+   241→/** Build ZenMux request reasoning object (no unsupported fields like exclude). */
+   242→function toZenMuxReasoning(
+   243→  r: { enabled?: boolean; effort?: string; max_tokens?: number } | undefined
+   244→): { enabled: boolean; effort?: string; max_tokens?: number } {
+   245→  if (r?.enabled === true) {
+   246→    return {
+   247→      enabled: true,
+   248→      ...(r.effort != null && { effort: r.effort }),
+   249→      ...(typeof r.max_tokens === "number" && Number.isFinite(r.max_tokens) && { max_tokens: r.max_tokens }),
+   250→    };
+   251→  }
+   252→  return { enabled: false };
+   253→}
+   254→
+   255→function toTokendanceThinking(
+   256→  r: { enabled?: boolean; effort?: string; max_tokens?: number } | undefined
+   257→): Record<string, unknown> | undefined {
+   258→  if (r === undefined) return undefined;
+   259→  if (r.enabled !== true) return { type: "disabled" };
+   260→
+   261→  const effortBudget: Record<string, number> = {
+   262→    minimal: 64,
+   263→    low: 128,
+   264→    medium: 256,
+   265→    high: 512,
+   266→  };
+   267→  const budget =
+   268→    typeof r.max_tokens === "number" && Number.isFinite(r.max_tokens)
+   269→      ? Math.max(32, Math.floor(r.max_tokens))
+   270→      : r.effort
+   271→        ? effortBudget[r.effort]
+   272→        : undefined;
+   273→
+   274→  return {
+   275→    type: "enabled",
+   276→    ...(budget ? { budget_tokens: budget } : {}),
+   277→  };
+   278→}
+   279→
+   280→type ChatRequestPayload = {
+   281→  model: string;
+   282→  messages: unknown[];
+   283→  temperature?: number;
+   284→  max_tokens?: number;
+   285→  stream?: boolean;
+   286→  reasoning?: ReasoningPayload;
+   287→  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+   288→  response_format?: unknown;
+   289→  provider?: Provider;
+   290→};
+   291→
+   292→async function runBatchItem(
+   293→  payload: ChatRequestPayload,
+   294→  headerApiKey: string | null,
+   295→  headerDashscopeKey: string | null,
+   296→  headerTokendanceKey: string | null,
+   297→  headerTokendanceBaseUrl: string | null
+   298→): Promise<{ ok: true; data: unknown } | { ok: false; status: number; error: string; details?: unknown }> {
+   299→  const {
+   300→    model,
+   301→    messages,
+   302→    temperature,
+   303→    max_tokens,
+   304→    stream,
+   305→    reasoning,
+   306→    reasoning_effort,
+   307→    response_format,
+   308→    provider,
+   309→  } = payload;
+   310→
+   311→  if (stream) {
+   312→    return { ok: false, status: 400, error: "Batch request does not support stream=true" };
+   313→  }
+   314→
+   315→  const modelProvider: Provider | null =
+   316→    provider === "dashscope" || provider === "zenmux" || provider === "tokendance" ? provider : getProviderForModel(model);
+   317→  if (!modelProvider) {
+   318→    return { ok: false, status: 400, error: `Unknown model: ${String(model ?? "").trim() || "unknown"}` };
+   319→  }
+   320→
+   321→  const isDefaultModel = PROJECT_MODELS.some((ref) => ref.model === model);
+   322→  if (!isDefaultModel) {
+   323→    if (modelProvider === "zenmux" && !headerApiKey) {
+   324→      return { ok: false, status: 401, error: "此模型需要您提供 Zenmux API Key" };
+   325→    }
+   326→    if (modelProvider === "dashscope" && !headerDashscopeKey) {
+   327→      return { ok: false, status: 401, error: "此模型需要您提供百炼 API Key" };
+   328→    }
+   329→    if (modelProvider === "tokendance" && !headerTokendanceKey) {
+   330→      return { ok: false, status: 401, error: "此模型需要您提供 TokenDance Key" };
+   331→    }
+   332→  }
+   333→
+   334→  const hasAnyCustomKeyHeader = Boolean((headerApiKey ?? "").trim() || (headerDashscopeKey ?? "").trim() || (headerTokendanceKey ?? "").trim());
+   335→
+   336→  const modelRefOverride = getModelRef(model);
+   337→  const normalizedTemperature =
+   338→    modelRefOverride?.temperature !== undefined
+   339→      ? modelRefOverride.temperature
+   340→      : (typeof temperature === "number" && Number.isFinite(temperature) ? temperature : 0.7);
+   341→  const cappedTemperature = (() => {
+   342→    const lower = typeof model === "string" ? model.toLowerCase() : "";
+   343→    const needZeroOne =
+   344→      modelProvider === "zenmux" ||
+   345→      lower.startsWith("moonshotai/") ||
+   346→      lower.includes("kimi");
+   347→    if (needZeroOne) {
+   348→      return Math.min(Math.max(0, normalizedTemperature), 1);
+   349→    }
+   350→    return Math.max(0, normalizedTemperature);
+   351→  })();
+   352→  const effectiveReasoning = modelRefOverride?.reasoning !== undefined ? modelRefOverride.reasoning : reasoning;
+   353→
+   354→  let processedMessages: unknown[] = messages;
+   355→  if (!supportsMultipartContent(model)) {
+   356→    processedMessages = flattenMultipartContent(processedMessages);
+   357→  } else if (supportsAutomaticPrefixCaching(model)) {
+   358→    processedMessages = prependDeepSeekStablePrefix(coalesceTextOnlyMultipartContent(processedMessages));
+   359→  } else if (modelProvider === "dashscope") {
+   360→    processedMessages = stripCacheControl(processedMessages);
+   361→  } else if (!supportsExplicitCaching(model)) {
+   362→    processedMessages = stripCacheControl(processedMessages);
+   363→  }
+   364→
+   365→  if (modelProvider === "dashscope") {
+   366→    if (hasAnyCustomKeyHeader && !headerDashscopeKey) {
+   367→      return { ok: false, status: 401, error: "已启用自定义 Key，但未提供百炼 API Key（已拒绝回退到系统 Key）" };
+   368→    }
+   369→    const dashscopeApiKey = headerDashscopeKey || process.env.DASHSCOPE_API_KEY;
+   370→    if (!dashscopeApiKey) {
+   371→      return { ok: false, status: 500, error: "DASHSCOPE_API_KEY not configured on server" };
+   372→    }
+   373→
+   374→    const normalizedModel = normalizeDashscopeModelName(model);
+   375→    const normalizedResponseFormat = response_format as { type?: unknown } | undefined;
+   376→    const dashscopeMessages =
+   377→      normalizedResponseFormat?.type === "json_object"
+   378→        ? withDashscopeJsonHint(processedMessages)
+   379→        : processedMessages;
+   380→
+   381→    const requestBody: Record<string, unknown> = {
+   382→      model: normalizedModel,
+   383→      messages: dashscopeMessages,
+   384→      temperature: cappedTemperature,
+   385→    };
+   386→
+   387→    if (typeof max_tokens === "number" && Number.isFinite(max_tokens)) {
+   388→      requestBody.max_tokens = Math.max(16, Math.floor(max_tokens));
+   389→    }
+   390→
+   391→    if (response_format) {
+   392→      requestBody.response_format = response_format;
+   393→    }
+   394→
+   395→    const controller = new AbortController();
+   396→    const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+   397→
+   398→    let response: Response;
+   399→    try {
+   400→      response = await fetch(DASHSCOPE_CHAT_COMPLETIONS_URL, {
+   401→        method: "POST",
+   402→        headers: {
+   403→          Authorization: `Bearer ${dashscopeApiKey}`,
+   404→          "Content-Type": "application/json",
+   405→        },
+   406→        body: JSON.stringify(requestBody),
+   407→        signal: controller.signal,
+   408→      });
+   409→    } finally {
+   410→      clearTimeout(timeoutId);
+   411→    }
+   412→
+   413→    if (!response.ok) {
+   414→      const errorText = await response.text();
+   415→      let parsed: unknown = undefined;
+   416→      try {
+   417→        parsed = JSON.parse(errorText);
+   418→      } catch {
+   419→        // ignore
+   420→      }
+   421→      return {
+   422→        ok: false,
+   423→        status: response.status,
+   424→        error: `DashScope API error: ${response.status}`,
+   425→        details: parsed ?? errorText,
+   426→      };
+   427→    }
+   428→
+   429→    const result = await response.json();
+   430→    return { ok: true, data: result };
+   431→  }
+   432→
+   433→  if (modelProvider === "tokendance") {
+   434→    if (hasAnyCustomKeyHeader && !headerTokendanceKey) {
+   435→      return { ok: false, status: 401, error: "已启用自定义 Key，但未提供 TokenDance Key（已拒绝回退到系统 Key）" };
+   436→    }
+   437→    const tokendanceApiKey = headerTokendanceKey || process.env.TOKENDANCE_API_KEY;
+   438→    const tokendanceBaseUrl = headerTokendanceBaseUrl || process.env.TOKENDANCE_BASE_URL || TOKENDANCE_BASE_URL;
+   439→    if (!tokendanceApiKey || !tokendanceBaseUrl) {
+   440→      return { ok: false, status: 500, error: "TOKENDANCE_API_KEY or TOKENDANCE_BASE_URL not configured on server" };
+   441→    }
+   442→
+   443→    const tokendanceUrl = getTokendanceUrl(tokendanceBaseUrl);
+   444→    if (!tokendanceUrl) {
+   445→      return { ok: false, status: 500, error: "Invalid TokenDance Base URL" };
+   446→    }
+   447→
+   448→    const requestBody: Record<string, unknown> = {
+   449→      model,
+   450→      messages: processedMessages,
+   451→      temperature: cappedTemperature,
+   452→    };
+   453→
+   454→    if (typeof max_tokens === "number" && Number.isFinite(max_tokens)) {
+   455→      requestBody.max_tokens = Math.max(16, Math.floor(max_tokens));
+   456→    }
+   457→
+   458→    // GLM-4.7 / Kimi K2.5 默认开启思考，API 参数可关闭（已实测有效）
+   459→    const modelLower = model.toLowerCase();
+   460→    const thinking = toTokendanceThinking(effectiveReasoning);
+   461→    if (thinking) {
+   462→      requestBody.thinking = thinking;
+   463→    } else if (modelLower.includes("glm") || modelLower.includes("kimi")) {
+   464→      requestBody.thinking = { type: "disabled" };
+   465→    }
+   466→
+   467→    if (response_format && supportsResponseFormat(model)) {
+   468→      requestBody.response_format = response_format;
+   469→    }
+   470→
+   471→    const controller = new AbortController();
+   472→    const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+   473→
+   474→    let response: Response;
+   475→    try {
+   476→      response = await fetch(tokendanceUrl, {
+   477→        method: "POST",
+   478→        headers: {
+   479→          Authorization: `Bearer ${tokendanceApiKey}`,
+   480→          "Content-Type": "application/json",
+   481→          "X-App-Name": "Wolfcha",
+   482→          "X-Site-URL": "https://wolf-cha.com",
+   483→        },
+   484→        body: JSON.stringify(requestBody),
+   485→        signal: controller.signal,
+   486→      });
+   487→    } finally {
+   488→      clearTimeout(timeoutId);
+   489→    }
+   490→
+   491→    if (!response.ok) {
+   492→      const errorText = await response.text();
+   493→      let parsed: unknown = undefined;
+   494→      try {
+   495→        parsed = JSON.parse(errorText);
+   496→      } catch {
+   497→        // ignore
+   498→      }
+   499→      return {
+   500→        ok: false,
+   501→        status: response.status,
+   502→        error: `TokenDance error: ${response.status}`,
+   503→        details: parsed ?? errorText,
+   504→      };
+   505→    }
+   506→
+   507→    const result = await response.json();
+   508→    return { ok: true, data: result };
+   509→  }
+   510→
+   511→  if (hasAnyCustomKeyHeader && !headerApiKey) {
+   512→    return { ok: false, status: 401, error: "已启用自定义 Key，但未提供 Zenmux API Key（已拒绝回退到系统 Key）" };
+   513→  }
+   514→
+   515→  const apiKey = headerApiKey || process.env.ZENMUX_API_KEY;
+   516→  if (!apiKey) {
+   517→    return { ok: false, status: 500, error: "ZENMUX_API_KEY not configured on server" };
+   518→  }
+   519→
+   520→  const requestBody: Record<string, unknown> = {
+   521→    model,
+   522→    messages: processedMessages,
+   523→    temperature: cappedTemperature,
+   524→  };
+   525→
+   526→  if (typeof max_tokens === "number" && Number.isFinite(max_tokens)) {
+   527→    requestBody.max_tokens = Math.max(16, Math.floor(max_tokens));
+   528→  }
+   529→
+   530→  const reasoningEffort = isReasoningEffort(reasoning_effort) ? reasoning_effort : undefined;
+   531→  const reasoningToUse = effectiveReasoning ?? reasoning;
+   532→  if (reasoningToUse !== undefined) {
+   533→    requestBody.reasoning = toZenMuxReasoning(reasoningToUse);
+   534→  } else if (reasoningEffort) {
+   535→    requestBody.reasoning_effort = reasoningEffort;
+   536→  } else {
+   537→    requestBody.reasoning = { enabled: false };
+   538→  }
+   539→
+   540→  if (response_format && supportsResponseFormat(model)) {
+   541→    requestBody.response_format = response_format;
+   542→  }
+   543→
+   544→  const controller = new AbortController();
+   545→  const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+   546→
+   547→  let response: Response;
+   548→  try {
+   549→    response = await fetch(ZENMUX_API_URL, {
+   550→      method: "POST",
+   551→      headers: {
+   552→        Authorization: `Bearer ${apiKey}`,
+   553→        "Content-Type": "application/json",
+   554→      },
+   555→      body: JSON.stringify(requestBody),
+   556→      signal: controller.signal,
+   557→    });
+   558→  } finally {
+   559→    clearTimeout(timeoutId);
+   560→  }
+   561→
+   562→  if (!response.ok) {
+   563→    const errorText = await response.text();
+   564→    return {
+   565→      ok: false,
+   566→      status: response.status,
+   567→      error: `ZenMux API error: ${response.status} - ${errorText}`,
+   568→    };
+   569→  }
+   570→
+   571→  const result = await response.json();
+   572→  return { ok: true, data: result };
+   573→}
+   574→
+   575→export async function POST(request: NextRequest) {
+   576→  const auth = await authenticateRequest(request as unknown as Request);
+   577→  if ("error" in auth) return auth.error;
+   578→
+   579→  const earlyZenmuxKey = request.headers.get("x-zenmux-api-key")?.trim();
+   580→  const earlyDashscopeKey = request.headers.get("x-dashscope-api-key")?.trim();
+   581→  const earlyTokendanceKey = request.headers.get("x-tokendance-api-key")?.trim();
+   582→  const hasCustomKeys = Boolean(
+   583→    (earlyZenmuxKey ?? "") ||
+   584→    (earlyDashscopeKey ?? "") ||
+   585→    (earlyTokendanceKey ?? "")
+   586→  );
+   587→
+   588→  if (!hasCustomKeys) {
+   589→    const hasCredits = await requireCredits(auth.user.id);
+   590→    if (!hasCredits) {
+   591→      const hasRecentSession = await hasRecentUnfinishedGameSession(auth.user.id);
+   592→      if (!hasRecentSession) {
+   593→        return NextResponse.json({ error: "Insufficient credits" }, { status: 403 });
+   594→      }
+   595→      console.warn("[api-chat] allowed by recent unfinished game session", {
+   596→        userId: auth.user.id,
+   597→      });
+   598→    }
+   599→  }
+   600→
+   601→  try {
+   602→    const body = await request.json();
+   603→    if (Array.isArray(body?.requests)) {
+   604→      const headerApiKey = request.headers.get("x-zenmux-api-key")?.trim() || null;
+   605→      const headerDashscopeKey = request.headers.get("x-dashscope-api-key")?.trim() || null;
+   606→      const headerTokendanceKey = request.headers.get("x-tokendance-api-key")?.trim() || null;
+   607→      const headerTokendanceBaseUrl = request.headers.get("x-tokendance-base-url")?.trim() || null;
+   608→      const requests = body.requests as ChatRequestPayload[];
+   609→      const results = await Promise.all(
+   610→        requests.map((req) => runBatchItem(req, headerApiKey, headerDashscopeKey, headerTokendanceKey, headerTokendanceBaseUrl))
+   611→      );
+   612→      return NextResponse.json({ results });
+   613→    }
+   614→    const {
+   615→      model,
+   616→      messages,
+   617→      temperature,
+   618→      max_tokens,
+   619→      stream,
+   620→      reasoning,
+   621→      reasoning_effort,
+   622→      response_format,
+   623→      provider,
+   624→    } = body;
+   625→    const modelProvider: Provider | null =
+   626→      provider === "dashscope" || provider === "zenmux" || provider === "tokendance" ? provider : getProviderForModel(model);
+   627→    if (!modelProvider) {
+   628→      // Reject unknown models early to avoid mis-routing.
+   629→      return NextResponse.json(
+   630→        { error: `Unknown model: ${String(model ?? "").trim() || "unknown"}` },
+   631→        { status: 400 }
+   632→      );
+   633→    }
+   634→    const headerApiKey = request.headers.get("x-zenmux-api-key")?.trim();
+   635→    const headerDashscopeKey = request.headers.get("x-dashscope-api-key")?.trim();
+   636→    const headerTokendanceKey = request.headers.get("x-tokendance-api-key")?.trim();
+   637→    const headerTokendanceBaseUrl = request.headers.get("x-tokendance-base-url")?.trim();
+   638→    const hasAnyCustomKeyHeader = Boolean((headerApiKey ?? "").trim() || (headerDashscopeKey ?? "").trim() || (headerTokendanceKey ?? "").trim());
+   639→    const isDefaultModel = PROJECT_MODELS.some((ref) => ref.model === model);
+   640→
+   641→    const modelRefOverride = getModelRef(model);
+   642→    const normalizedTemperature =
+   643→      modelRefOverride?.temperature !== undefined
+   644→        ? modelRefOverride.temperature
+   645→        : (typeof temperature === "number" && Number.isFinite(temperature) ? temperature : 0.7);
+   646→    // ZenMux requires temperature in 0..1; Moonshot/Kimi also
+   647→    const cappedTemperature = (() => {
+   648→      const lower = typeof model === "string" ? model.toLowerCase() : "";
+   649→      const needZeroOne =
+   650→        modelProvider === "zenmux" ||
+   651→        lower.startsWith("moonshotai/") ||
+   652→        lower.includes("kimi");
+   653→      if (needZeroOne) {
+   654→        return Math.min(Math.max(0, normalizedTemperature), 1);
+   655→      }
+   656→      return Math.max(0, normalizedTemperature);
+   657→    })();
+   658→    const effectiveReasoning = modelRefOverride?.reasoning !== undefined ? modelRefOverride.reasoning : reasoning;
+   659→
+   660→    // Process messages based on model capabilities
+   661→    let processedMessages = messages;
+   662→
+   663→    // For models that don't support multipart content, flatten to string
+   664→    if (!supportsMultipartContent(model)) {
+   665→      processedMessages = flattenMultipartContent(processedMessages);
+   666→    } else if (supportsAutomaticPrefixCaching(model)) {
+   667→      processedMessages = prependDeepSeekStablePrefix(coalesceTextOnlyMultipartContent(processedMessages));
+   668→    } else if (modelProvider === "dashscope") {
+   669→      // Dashscope is OpenAI compatible but does not support cache_control
+   670→      processedMessages = stripCacheControl(processedMessages);
+   671→    } else if (!supportsExplicitCaching(model)) {
+   672→      // For models that support multipart but not cache_control, strip cache_control
+   673→      processedMessages = stripCacheControl(processedMessages);
+   674→    }
+   675→
+   676→    if (!isDefaultModel) {
+   677→      if (modelProvider === "zenmux" && !headerApiKey) {
+   678→        return NextResponse.json(
+   679→          { error: "此模型需要您提供 Zenmux API Key" },
+   680→          { status: 401 }
+   681→        );
+   682→      }
+   683→      if (modelProvider === "dashscope" && !headerDashscopeKey) {
+   684→        return NextResponse.json(
+   685→          { error: "此模型需要您提供百炼 API Key" },
+   686→          { status: 401 }
+   687→        );
+   688→      }
+   689→      if (modelProvider === "tokendance" && !headerTokendanceKey) {
+   690→        return NextResponse.json(
+   691→          { error: "此模型需要您提供 TokenDance Key" },
+   692→          { status: 401 }
+   693→        );
+   694→      }
+   695→    }
+   696→
+   697→    if (modelProvider === "dashscope") {
+   698→      if (hasAnyCustomKeyHeader && !headerDashscopeKey) {
+   699→        return NextResponse.json(
+   700→          { error: "已启用自定义 Key，但未提供百炼 API Key（已拒绝回退到系统 Key）" },
+   701→          { status: 401 }
+   702→        );
+   703→      }
+   704→
+   705→      const dashscopeApiKey = headerDashscopeKey || process.env.DASHSCOPE_API_KEY;
+   706→      if (!dashscopeApiKey) {
+   707→        return NextResponse.json(
+   708→          { error: "DASHSCOPE_API_KEY not configured on server" },
+   709→          { status: 500 }
+   710→        );
+   711→      }
+   712→
+   713→      const dashscopeApiUrl = DASHSCOPE_CHAT_COMPLETIONS_URL;
+   714→
+   715→      const normalizedModel = normalizeDashscopeModelName(model);
+   716→      const normalizedResponseFormat = response_format as { type?: unknown } | undefined;
+   717→      const dashscopeMessages =
+   718→        normalizedResponseFormat?.type === "json_object"
+   719→          ? withDashscopeJsonHint(processedMessages)
+   720→          : processedMessages;
+   721→      const requestBody: Record<string, unknown> = {
+   722→        model: normalizedModel,
+   723→        messages: dashscopeMessages,
+   724→        temperature: cappedTemperature,
+   725→      };
+   726→
+   727→      if (typeof max_tokens === "number" && Number.isFinite(max_tokens)) {
+   728→        requestBody.max_tokens = Math.max(16, Math.floor(max_tokens));
+   729→      }
+   730→
+   731→      if (stream) {
+   732→        requestBody.stream = true;
+   733→      }
+   734→
+   735→      if (response_format) {
+   736→        requestBody.response_format = response_format;
+   737→      }
+   738→
+   739→      const controller = new AbortController();
+   740→      const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+   741→
+   742→      let response: Response;
+   743→      try {
+   744→        response = await fetch(dashscopeApiUrl, {
+   745→          method: "POST",
+   746→          headers: {
+   747→            Authorization: `Bearer ${dashscopeApiKey}`,
+   748→            "Content-Type": "application/json",
+   749→          },
+   750→          body: JSON.stringify(requestBody),
+   751→          signal: controller.signal,
+   752→        });
+   753→      } finally {
+   754→        clearTimeout(timeoutId);
+   755→      }
+   756→
+   757→      if (!response.ok) {
+   758→        const errorText = await response.text();
+   759→        let parsed: unknown = undefined;
+   760→        try {
+   761→          parsed = JSON.parse(errorText);
+   762→        } catch {
+   763→          // ignore
+   764→        }
+   765→        return NextResponse.json(
+   766→          {
+   767→            error: `DashScope API error: ${response.status}`,
+   768→            details: parsed ?? errorText,
+   769→          },
+   770→          { status: response.status }
+   771→        );
+   772→      }
+   773→
+   774→      if (stream) {
+   775→        // For streaming responses, forward the stream
+   776→        const headers = new Headers();
+   777→        headers.set("Content-Type", "text/event-stream");
+   778→        headers.set("Cache-Control", "no-cache");
+   779→        headers.set("Connection", "keep-alive");
+   780→
+   781→        return new Response(response.body, { headers });
+   782→      }
+   783→
+   784→      const result = await response.json();
+   785→      return NextResponse.json(result);
+   786→    }
+   787→
+   788→    if (modelProvider === "tokendance") {
+   789→      if (hasAnyCustomKeyHeader && !headerTokendanceKey) {
+   790→        return NextResponse.json(
+   791→          { error: "已启用自定义 Key，但未提供 TokenDance Key（已拒绝回退到系统 Key）" },
+   792→          { status: 401 }
+   793→        );
+   794→      }
+   795→
+   796→      const tokendanceApiKey = headerTokendanceKey || process.env.TOKENDANCE_API_KEY;
+   797→      const tokendanceBaseUrl = headerTokendanceBaseUrl || process.env.TOKENDANCE_BASE_URL || TOKENDANCE_BASE_URL;
+   798→      if (!tokendanceApiKey || !tokendanceBaseUrl) {
+   799→        return NextResponse.json(
+   800→          { error: "TOKENDANCE_API_KEY or TOKENDANCE_BASE_URL not configured on server" },
+   801→          { status: 500 }
+   802→        );
+   803→      }
+   804→
+   805→      const tokendanceUrl = getTokendanceUrl(tokendanceBaseUrl);
+   806→      if (!tokendanceUrl) {
+   807→        return NextResponse.json(
+   808→          { error: "Invalid TokenDance Base URL" },
+   809→          { status: 500 }
+   810→        );
+   811→      }
+   812→
+   813→      const requestBody: Record<string, unknown> = {
+   814→        model,
+   815→        messages: processedMessages,
+   816→        temperature: cappedTemperature,
+   817→      };
+   818→
+   819→      if (typeof max_tokens === "number" && Number.isFinite(max_tokens)) {
+   820→        requestBody.max_tokens = Math.max(16, Math.floor(max_tokens));
+   821→      }
+   822→
+   823→      if (stream) {
+   824→        requestBody.stream = true;
+   825→      }
+   826→
+   827→      // GLM-4.7 / Kimi K2.5 默认开启思考，API 参数可关闭（已实测有效）
+   828→      const modelLower = model.toLowerCase();
+   829→      const thinking = toTokendanceThinking(effectiveReasoning);
+   830→      if (thinking) {
+   831→        requestBody.thinking = thinking;
+   832→      } else if (modelLower.includes("glm") || modelLower.includes("kimi")) {
+   833→        requestBody.thinking = { type: "disabled" };
+   834→      }
+   835→
+   836→      if (response_format && supportsResponseFormat(model)) {
+   837→        requestBody.response_format = response_format;
+   838→      }
+   839→
+   840→      const controller = new AbortController();
+   841→      const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+   842→
+   843→      let response: Response;
+   844→      try {
+   845→        response = await fetch(tokendanceUrl, {
+   846→          method: "POST",
+   847→          headers: {
+   848→            Authorization: `Bearer ${tokendanceApiKey}`,
+   849→            "Content-Type": "application/json",
+   850→            "X-App-Name": "Wolfcha",
+   851→            "X-Site-URL": "https://wolf-cha.com",
+   852→          },
+   853→          body: JSON.stringify(requestBody),
+   854→          signal: controller.signal,
+   855→        });
+   856→      } finally {
+   857→        clearTimeout(timeoutId);
+   858→      }
+   859→
+   860→      if (!response.ok) {
+   861→        const errorText = await response.text();
+   862→        let parsed: unknown = undefined;
+   863→        try {
+   864→          parsed = JSON.parse(errorText);
+   865→        } catch {
+   866→          // ignore
+   867→        }
+   868→        return NextResponse.json(
+   869→          {
+   870→            error: `TokenDance error: ${response.status}`,
+   871→            details: parsed ?? errorText,
+   872→          },
+   873→          { status: response.status }
+   874→        );
+   875→      }
+   876→
+   877→      if (stream) {
+   878→        const headers = new Headers();
+   879→        headers.set("Content-Type", "text/event-stream");
+   880→        headers.set("Cache-Control", "no-cache");
+   881→        headers.set("Connection", "keep-alive");
+   882→
+   883→        return new Response(response.body, { headers });
+   884→      }
+   885→
+   886→      const result = await response.json();
+   887→      return NextResponse.json(result);
+   888→    }
+   889→
+   890→    if (hasAnyCustomKeyHeader && !headerApiKey) {
+   891→      return NextResponse.json(
+   892→        { error: "已启用自定义 Key，但未提供 Zenmux API Key（已拒绝回退到系统 Key）" },
+   893→        { status: 401 }
+   894→      );
+   895→    }
+   896→
+   897→    const apiKey = headerApiKey || process.env.ZENMUX_API_KEY;
+   898→    if (!apiKey) {
+   899→      return NextResponse.json(
+   900→        { error: "ZENMUX_API_KEY not configured on server" },
+   901→        { status: 500 }
+   902→      );
+   903→    }
+   904→
+   905→    const requestBody: Record<string, unknown> = {
+   906→      model,
+   907→      messages: processedMessages,
+   908→      temperature: cappedTemperature,
+   909→    };
+   910→
+   911→    if (typeof max_tokens === "number" && Number.isFinite(max_tokens)) {
+   912→      requestBody.max_tokens = Math.max(16, Math.floor(max_tokens));
+   913→    }
+   914→
+   915→    if (stream) {
+   916→      requestBody.stream = true;
+   917→    }
+   918→
+   919→    const reasoningEffort = isReasoningEffort(reasoning_effort) ? reasoning_effort : undefined;
+   920→    const reasoningToUse = effectiveReasoning ?? reasoning;
+   921→    if (reasoningToUse !== undefined) {
+   922→      requestBody.reasoning = toZenMuxReasoning(reasoningToUse);
+   923→    } else if (reasoningEffort) {
+   924→      requestBody.reasoning_effort = reasoningEffort;
+   925→    } else {
+   926→      requestBody.reasoning = { enabled: false };
+   927→    }
+   928→
+   929→    // Only include response_format for models that support it
+   930→    if (response_format && supportsResponseFormat(model)) {
+   931→      requestBody.response_format = response_format;
+   932→    }
+   933→
+   934→    const controller = new AbortController();
+   935→    const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+   936→
+   937→    let response: Response;
+   938→    try {
+   939→      response = await fetch(ZENMUX_API_URL, {
+   940→        method: "POST",
+   941→        headers: {
+   942→          Authorization: `Bearer ${apiKey}`,
+   943→          "Content-Type": "application/json",
+   944→        },
+   945→        body: JSON.stringify(requestBody),
+   946→        signal: controller.signal,
+   947→      });
+   948→    } finally {
+   949→      clearTimeout(timeoutId);
+   950→    }
+   951→
+   952→    if (!response.ok) {
+   953→      const errorText = await response.text();
+   954→      return NextResponse.json(
+   955→        { error: `ZenMux API error: ${response.status} - ${errorText}` },
+   956→        { status: response.status }
+   957→      );
+   958→    }
+   959→
+   960→    if (stream) {
+   961→      // For streaming responses, forward the stream
+   962→      const headers = new Headers();
+   963→      headers.set("Content-Type", "text/event-stream");
+   964→      headers.set("Cache-Control", "no-cache");
+   965→      headers.set("Connection", "keep-alive");
+   966→
+   967→      return new Response(response.body, { headers });
+   968→    }
+   969→
+   970→    const result = await response.json();
+   971→    return NextResponse.json(result);
+   972→  } catch (error) {
+   973→    console.error("[api/chat] Error:", error);
+   974→    return NextResponse.json(
+   975→      { error: error instanceof Error ? error.message : "Unknown error" },
+   976→      { status: 500 }
+   977→    );
+   978→  }
+   979→}
+   980→

@@ -66,7 +66,7 @@ export type Alignment = "village" | "wolf";
  }
 
 export interface ModelRef {
-  provider: "zenmux" | "dashscope" | "tokendance";
+  provider: "zai";
   model: string;
   /** Override call-time temperature for this model (e.g. some models only support 1) */
   temperature?: number;
@@ -258,49 +258,26 @@ export interface DailySummaryVoteData {
   execution_vote?: { eliminated: number; votes: Record<string, number[]> };
 }
 
-// Shared model IDs
+// Shared model IDs — all routed through z.ai's unified LLM gateway.
 export const MODEL_IDS = {
-  zenmux: {
-    geminiFlashLite: "google/gemini-3.1-flash-lite-preview",
-    geminiFlashPreview: "google/gemini-3-flash-preview",
-    deepseek: "deepseek/deepseek-v3.2",
-    gpt52Chat: "openai/gpt-5.2-chat",
-    claudeHaiku45: "anthropic/claude-haiku-4.5",
-    claudeSonnet45: "anthropic/claude-sonnet-4.5",
-    claudeOpus45: "anthropic/claude-opus-4.5",
-    deepseekV4Flash: "deepseek/deepseek-v4-flash",
-    grok4: "x-ai/grok-4",
-    glm47: "z-ai/glm-4.7",
-    minimaxM21: "minimax/minimax-m2.1",
-  },
-  dashscope: {
-    deepseek: "deepseek-v3.2",
-  },
-  tokendance: {
-    minimaxM27: "minimax-m2.7",
-    deepseekV4Pro: "deepseek-v4-pro",
-    deepseekV4Flash: "deepseek-v4-flash",
-    qwen3Max: "qwen3-max",
-    glm5: "glm-5",
-    kimiK25: "kimi-k2.5",
-    deepseekV32: "deepseek-v3.2",
+  zai: {
+    glm: "glm-4.6",
+    glmFlash: "glm-4.5-flash",
   },
 } as const;
 
-const BUILTIN_DEEPSEEK_V4_PRO_MODEL: ModelRef = {
-  provider: "tokendance",
-  model: MODEL_IDS.tokendance.deepseekV4Pro,
+const BUILTIN_ZAI_MODEL: ModelRef = {
+  provider: "zai",
+  model: MODEL_IDS.zai.glm,
   reasoning: { enabled: false },
 };
 
 export const DEFAULT_MODEL_CONFIG = {
-  generator: MODEL_IDS.zenmux.geminiFlashLite,
-  summary: MODEL_IDS.tokendance.deepseekV4Pro,
-  review: MODEL_IDS.tokendance.deepseekV4Pro,
+  generator: MODEL_IDS.zai.glm,
+  summary: MODEL_IDS.zai.glm,
+  review: MODEL_IDS.zai.glm,
   validation: {
-    zenmux: MODEL_IDS.zenmux.geminiFlashLite,
-    dashscope: MODEL_IDS.dashscope.deepseek,
-    tokendance: MODEL_IDS.tokendance.minimaxM27,
+    zai: MODEL_IDS.zai.glm,
   },
 } as const;
 
@@ -308,50 +285,27 @@ export const DEFAULT_MODEL_CONFIG = {
 export const GENERATOR_MODEL = DEFAULT_MODEL_CONFIG.generator;
 export const SUMMARY_MODEL = DEFAULT_MODEL_CONFIG.summary;
 export const REVIEW_MODEL = DEFAULT_MODEL_CONFIG.review;
-export const ZENMUX_VALIDATION_MODEL = DEFAULT_MODEL_CONFIG.validation.zenmux;
-export const DASHSCOPE_VALIDATION_MODEL = DEFAULT_MODEL_CONFIG.validation.dashscope;
-export const TOKENDANCE_VALIDATION_MODEL = DEFAULT_MODEL_CONFIG.validation.tokendance;
+export const ZAI_VALIDATION_MODEL = DEFAULT_MODEL_CONFIG.validation.zai;
 
 export const BUILTIN_PLAYER_MODELS: ModelRef[] = [
-  BUILTIN_DEEPSEEK_V4_PRO_MODEL,
+  BUILTIN_ZAI_MODEL,
 ];
 
-// Default built-in models exposed to the app when custom key is not enabled.
-// This list includes system defaults plus the small built-in player pool.
+// Default built-in models exposed to the app.
 export const AVAILABLE_MODELS: ModelRef[] = [
-  BUILTIN_DEEPSEEK_V4_PRO_MODEL,
+  BUILTIN_ZAI_MODEL,
 ];
 
-// Built-in project-key models that the server may call internally.
-// These are intentionally not exposed in the custom-key model selector.
+// Built-in project models that the server may call internally.
 export const PROJECT_MODELS: ModelRef[] = [
   ...AVAILABLE_MODELS,
-  // Provider-specific validation models for user API key checks.
-  { provider: "dashscope", model: MODEL_IDS.dashscope.deepseek },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.geminiFlashLite },
+  { provider: "zai", model: MODEL_IDS.zai.glmFlash },
 ];
 
-// User-selectable models when custom key is enabled.
+// User-selectable models when custom key is enabled (all z.ai).
 export const ALL_MODELS: ModelRef[] = [
-  { provider: "dashscope", model: MODEL_IDS.dashscope.deepseek },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.geminiFlashLite },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.deepseek },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.deepseekV4Flash },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.geminiFlashPreview },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.gpt52Chat },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.claudeHaiku45 },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.claudeSonnet45 },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.claudeOpus45 },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.grok4 },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.glm47, temperature: 1, reasoning: { enabled: false } },
-  { provider: "zenmux", model: MODEL_IDS.zenmux.minimaxM21, temperature: 1, reasoning: { enabled: false } },
-  { provider: "tokendance", model: MODEL_IDS.tokendance.minimaxM27, temperature: 1, reasoning: { enabled: false } },
-  { provider: "tokendance", model: MODEL_IDS.tokendance.deepseekV4Pro, reasoning: { enabled: false } },
-  { provider: "tokendance", model: MODEL_IDS.tokendance.deepseekV4Flash, reasoning: { enabled: false } },
-  { provider: "tokendance", model: MODEL_IDS.tokendance.qwen3Max, reasoning: { enabled: false } },
-  { provider: "tokendance", model: MODEL_IDS.tokendance.glm5, temperature: 1, reasoning: { enabled: false } },
-  { provider: "tokendance", model: MODEL_IDS.tokendance.kimiK25, temperature: 1, reasoning: { enabled: false } },
-  { provider: "tokendance", model: MODEL_IDS.tokendance.deepseekV32, reasoning: { enabled: false } },
+  { provider: "zai", model: MODEL_IDS.zai.glm, reasoning: { enabled: false } },
+  { provider: "zai", model: MODEL_IDS.zai.glmFlash, reasoning: { enabled: false } },
 ];
 
 // Models not allowed for in-game players (summary & generation only).

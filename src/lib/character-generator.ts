@@ -13,9 +13,6 @@ import {
 import {
   getGeneratorModel,
   getSelectedModels,
-  hasDashscopeKey,
-  hasTokendanceKey,
-  hasZenmuxKey,
   isCustomKeyEnabled,
 } from "@/lib/api-keys";
 import { aiLogger } from "./ai-logger";
@@ -64,7 +61,7 @@ function getModelRefForModel(model: string): ModelRef {
   return (
     PROJECT_MODELS.find((ref) => ref.model === model) ??
     ALL_MODELS.find((ref) => ref.model === model) ??
-    { provider: "zenmux" as const, model }
+    { provider: "zai" as const, model }
   );
 }
 
@@ -82,9 +79,7 @@ export const sampleModelRefs = (count: number): ModelRef[] => {
     const fullPool = ALL_MODELS.length > 0 ? ALL_MODELS : defaultPool;
 
     const allowedProviders = new Set<ModelRef["provider"]>();
-    if (hasZenmuxKey()) allowedProviders.add("zenmux");
-    if (hasDashscopeKey()) allowedProviders.add("dashscope");
-    if (hasTokendanceKey()) allowedProviders.add("tokendance");
+    allowedProviders.add("zai");
     if (allowedProviders.size === 0) return defaultPool;
 
     // Filter by allowed providers, then exclude non-player models
@@ -714,7 +709,7 @@ export async function generateCharacters(
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       console.log(
-        `[character-gen] Attempt ${attempt + 1}/2, customKeyEnabled: ${isCustomKeyEnabled()}, hasZenmux: ${hasZenmuxKey()}, hasDashscope: ${hasDashscopeKey()}, hasTokendance: ${hasTokendanceKey()}`
+        `[character-gen] Attempt ${attempt + 1}/2, customKeyEnabled: ${isCustomKeyEnabled()}`
       );
       return await runOnce();
     } catch (error) {

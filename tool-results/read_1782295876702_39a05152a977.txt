@@ -1,0 +1,869 @@
+     1→import {
+     2→  getDashscopeApiKey,
+     3→  getTokendanceApiKey,
+     4→  getTokendanceBaseUrl,
+     5→  getZenmuxApiKey,
+     6→  isCustomKeyEnabled,
+     7→} from "@/lib/api-keys";
+     8→import { ALL_MODELS, AVAILABLE_MODELS, PROJECT_MODELS, type ModelRef } from "@/types/game";
+     9→import { gameStatsTracker } from "@/hooks/useGameStats";
+    10→import { gameSessionTracker } from "@/lib/game-session-tracker";
+    11→import { getAuthHeaders } from "@/lib/auth-headers";
+    12→import { parseLLMJson } from "./llm-json";
+    13→
+    14→export type LLMContentPart =
+    15→  | { type: "text"; text: string; cache_control?: { type: "ephemeral"; ttl?: "1h" } }
+    16→  | { type: "image_url"; image_url: { url: string; detail?: string } }
+    17→  | { type: "input_audio"; input_audio: { data: string; format: "mp3" | "wav" } };
+    18→
+    19→export type ApiKeySource = "user" | "project";
+    20→
+    21→export interface LLMMessage {
+    22→  role: "system" | "user" | "assistant";
+    23→  content: string | LLMContentPart[];
+    24→  reasoning_details?: unknown;
+    25→}
+    26→
+    27→type Provider = "zenmux" | "dashscope" | "tokendance";
+    28→
+    29→function isRecord(value: unknown): value is Record<string, unknown> {
+    30→  return typeof value === "object" && value !== null;
+    31→}
+    32→
+    33→
+    34→function getProviderForModel(model: string): Provider {
+    35→   const modelRef =
+    36→     ALL_MODELS.find((ref) => ref.model === model) ??
+    37→     PROJECT_MODELS.find((ref) => ref.model === model);
+    38→   return modelRef?.provider ?? "zenmux";
+    39→ }
+    40→
+    41→// When using built-in keys (custom disabled), only project-key models are allowed.
+    42→// Game state may contain modelRef from a custom-key game; map it back to a built-in
+    43→// model to avoid requiring a user-supplied key after the toggle is turned off.
+    44→function resolveModelForBuiltin(model: string): string {
+    45→  if (PROJECT_MODELS.some((r) => r.model === model)) return model;
+    46→  const m =
+    47→    AVAILABLE_MODELS.find((r) => r.provider === "zenmux") ?? AVAILABLE_MODELS[0];
+    48→  return m?.model ?? model;
+    49→}
+    50→
+    51→export function resolveApiKeySource(model: string): ApiKeySource {
+    52→   const customEnabled = isCustomKeyEnabled();
+    53→   if (!customEnabled) return "project";
+    54→
+    55→   const provider = getProviderForModel(model);
+    56→   if (provider === "dashscope") {
+    57→     return getDashscopeApiKey() ? "user" : "project";
+    58→   }
+    59→   if (provider === "tokendance") {
+    60→     return getTokendanceApiKey() && getTokendanceBaseUrl() ? "user" : "project";
+    61→   }
+    62→   return getZenmuxApiKey() ? "user" : "project";
+    63→ }
+    64→
+    65→function buildCustomKeyHeaders(customEnabled: boolean): Record<string, string> {
+    66→  if (!customEnabled) return {};
+    67→
+    68→  const zenmuxApiKey = getZenmuxApiKey();
+    69→  const dashscopeApiKey = getDashscopeApiKey();
+    70→  const tokendanceApiKey = getTokendanceApiKey();
+    71→  const tokendanceBaseUrl = getTokendanceBaseUrl();
+    72→  return {
+    73→    ...(zenmuxApiKey ? { "X-Zenmux-Api-Key": zenmuxApiKey } : {}),
+    74→    ...(dashscopeApiKey ? { "X-Dashscope-Api-Key": dashscopeApiKey } : {}),
+    75→    ...(tokendanceApiKey ? { "X-Tokendance-Api-Key": tokendanceApiKey } : {}),
+    76→    ...(tokendanceBaseUrl ? { "X-Tokendance-Base-Url": tokendanceBaseUrl } : {}),
+    77→  };
+    78→}
+    79→
+    80→export interface ChatCompletionResponse {
+    81→  id: string;
+    82→  choices: {
+    83→    message: {
+    84→      role: "assistant";
+    85→      content: string;
+    86→      reasoning_details?: unknown;
+    87→    };
+    88→    finish_reason: string;
+    89→  }[];
+    90→  usage?: {
+    91→    prompt_tokens: number;
+    92→    completion_tokens: number;
+    93→    total_tokens: number;
+    94→    prompt_cache_hit_tokens?: number;
+    95→    prompt_cache_miss_tokens?: number;
+    96→    prompt_tokens_details?: {
+    97→      cached_tokens?: number;
+    98→    } | null;
+    99→  };
+   100→}
+   101→
+   102→export interface PromptCacheUsage {
+   103→  promptCacheInputTokens: number;
+   104→  promptCacheHitTokens: number;
+   105→  promptCacheMissTokens: number;
+   106→  promptCacheHitRatio: number;
+   107→  source: "prompt_cache_hit_tokens" | "prompt_tokens_details.cached_tokens" | "none";
+   108→}
+   109→
+   110→export function extractPromptCacheUsage(usage: ChatCompletionResponse["usage"] | undefined): PromptCacheUsage {
+   111→  const promptTokens =
+   112→    typeof usage?.prompt_tokens === "number" && Number.isFinite(usage.prompt_tokens)
+   113→      ? usage.prompt_tokens
+   114→      : 0;
+   115→
+   116→  if (typeof usage?.prompt_cache_hit_tokens === "number") {
+   117→    const hit = Math.max(0, usage.prompt_cache_hit_tokens);
+   118→    const miss =
+   119→      typeof usage.prompt_cache_miss_tokens === "number"
+   120→        ? Math.max(0, usage.prompt_cache_miss_tokens)
+   121→        : Math.max(0, promptTokens - hit);
+   122→    const input = hit + miss || promptTokens;
+   123→    return {
+   124→      promptCacheInputTokens: input,
+   125→      promptCacheHitTokens: hit,
+   126→      promptCacheMissTokens: miss,
+   127→      promptCacheHitRatio: input > 0 ? hit / input : 0,
+   128→      source: "prompt_cache_hit_tokens",
+   129→    };
+   130→  }
+   131→
+   132→  const cachedTokens = usage?.prompt_tokens_details?.cached_tokens;
+   133→  if (typeof cachedTokens === "number" && Number.isFinite(cachedTokens)) {
+   134→    const hit = Math.max(0, cachedTokens);
+   135→    const miss = Math.max(0, promptTokens - hit);
+   136→    return {
+   137→      promptCacheInputTokens: promptTokens,
+   138→      promptCacheHitTokens: hit,
+   139→      promptCacheMissTokens: miss,
+   140→      promptCacheHitRatio: promptTokens > 0 ? hit / promptTokens : 0,
+   141→      source: "prompt_tokens_details.cached_tokens",
+   142→    };
+   143→  }
+   144→
+   145→  return {
+   146→    promptCacheInputTokens: promptTokens,
+   147→    promptCacheHitTokens: 0,
+   148→    promptCacheMissTokens: promptTokens,
+   149→    promptCacheHitRatio: 0,
+   150→    source: "none",
+   151→  };
+   152→}
+   153→
+   154→export type ResponseFormat =
+   155→  | { type: "text" }
+   156→  | { type: "json_object" }
+   157→  | {
+   158→      type: "json_schema";
+   159→      strict?: boolean;
+   160→      json_schema: {
+   161→        name: string;
+   162→        description?: string;
+   163→        schema: unknown;
+   164→        // Note: 'strict' is not supported by ZenMux, use json_object for simple cases
+   165→      };
+   166→    };
+   167→
+   168→// ZenMux reasoning: enabled, effort (minimal|low|medium|high), max_tokens (optional). No exclude.
+   169→export interface ReasoningOptions {
+   170→  enabled: boolean;
+   171→  effort?: "minimal" | "low" | "medium" | "high";
+   172→  max_tokens?: number;
+   173→}
+   174→
+   175→export interface GenerateOptions {
+   176→  model: string;
+   177→  provider?: Provider;
+   178→  messages: LLMMessage[];
+   179→  temperature?: number;
+   180→  max_tokens?: number;
+   181→  reasoning?: ReasoningOptions;
+   182→  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+   183→  response_format?: ResponseFormat;
+   184→}
+   185→
+   186→/** Merge modelRef overrides (temperature, reasoning) into options; modelRef values override call-time when present. */
+   187→export function mergeOptionsFromModelRef<T extends GenerateOptions>(
+   188→  modelRef: ModelRef | undefined,
+   189→  options: T
+   190→): T {
+   191→  if (!modelRef) return options;
+   192→  const out = { ...options } as T;
+   193→  (out as GenerateOptions).provider = modelRef.provider;
+   194→  if (modelRef.temperature !== undefined) (out as GenerateOptions).temperature = modelRef.temperature;
+   195→  if (modelRef.reasoning !== undefined) (out as GenerateOptions).reasoning = modelRef.reasoning;
+   196→  return out;
+   197→}
+   198→
+   199→export type BatchCompletionResult =
+   200→  | { ok: true; content: string; reasoning_details?: unknown; raw: ChatCompletionResponse }
+   201→  | { ok: false; error: string; status?: number };
+   202→
+   203→const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+   204→
+   205→function parseRetryAfterMs(response: Response): number | null {
+   206→  const raw = response.headers.get("retry-after");
+   207→  if (!raw) return null;
+   208→  const sec = Number(raw);
+   209→  if (Number.isFinite(sec) && sec > 0) return Math.round(sec * 1000);
+   210→
+   211→  const dateMs = Date.parse(raw);
+   212→  if (!Number.isFinite(dateMs)) return null;
+   213→  const diff = dateMs - Date.now();
+   214→  return diff > 0 ? diff : null;
+   215→}
+   216→
+   217→const QUOTA_EXHAUSTED_MARKER = "[QUOTA_EXHAUSTED]";
+   218→
+   219→function isQuotaExhaustedError(status: number, errorText: string): boolean {
+   220→  if (status === 402) return true;
+   221→  const lower = errorText.toLowerCase();
+   222→  return (
+   223→    lower.includes("insufficient") ||
+   224→    lower.includes("quota") ||
+   225→    lower.includes("balance") ||
+   226→    lower.includes("余额") ||
+   227→    lower.includes("欠费") ||
+   228→    lower.includes("arrearage") ||
+   229→    (status === 401 && lower.includes("已启用自定义 key"))
+   230→  );
+   231→}
+   232→
+   233→function formatApiError(status: number, errorText: string): string {
+   234→  let msg = `API error: ${status}`;
+   235→  try {
+   236→    const errorJson: unknown = JSON.parse(errorText);
+   237→    if (isRecord(errorJson)) {
+   238→      if (typeof errorJson.error === "string" && errorJson.error.trim()) {
+   239→        msg = errorJson.error.trim();
+   240→      }
+   241→
+   242→      const details = errorJson.details;
+   243→      if (isRecord(details)) {
+   244→        const nestedError = details.error;
+   245→        if (isRecord(nestedError) && typeof nestedError.message === "string" && nestedError.message.trim()) {
+   246→          msg = `${msg} - ${nestedError.message.trim()}`;
+   247→        }
+   248→      }
+   249→    }
+   250→  } catch {
+   251→    const trimmed = (errorText || "").trim();
+   252→    msg = trimmed ? `${msg} - ${trimmed.slice(0, 600)}` : msg;
+   253→  }
+   254→
+   255→  if (isQuotaExhaustedError(status, errorText)) {
+   256→    return `${QUOTA_EXHAUSTED_MARKER} ${msg}`;
+   257→  }
+   258→  return msg;
+   259→}
+   260→
+   261→export function isQuotaExhaustedMessage(message: string): boolean {
+   262→  return message.includes(QUOTA_EXHAUSTED_MARKER);
+   263→}
+   264→
+   265→async function sleep(ms: number): Promise<void> {
+   266→  await new Promise((resolve) => setTimeout(resolve, ms));
+   267→}
+   268→
+   269→async function fetchWithRetry(
+   270→  input: RequestInfo | URL,
+   271→  init: RequestInit,
+   272→  maxAttempts: number
+   273→): Promise<Response> {
+   274→  let lastResponse: Response | null = null;
+   275→  let lastError: unknown = null;
+   276→
+   277→  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+   278→    try {
+   279→      const response = await fetch(input, init);
+   280→      lastResponse = response;
+   281→
+   282→      if (response.ok) return response;
+   283→
+   284→      if (!RETRYABLE_STATUS.has(response.status) || attempt === maxAttempts) {
+   285→        return response;
+   286→      }
+   287→
+   288→      const retryAfterMs = parseRetryAfterMs(response);
+   289→      const base = response.status === 429 ? 1000 : 400;
+   290→      const jitter = Math.floor(Math.random() * 200);
+   291→      const backoffMs =
+   292→        (retryAfterMs !== null ? Math.min(15000, Math.max(0, retryAfterMs)) : base * 2 ** (attempt - 1)) +
+   293→        jitter;
+   294→      await sleep(backoffMs);
+   295→    } catch (err) {
+   296→      lastError = err;
+   297→      if (attempt === maxAttempts) break;
+   298→      const base = 400;
+   299→      const jitter = Math.floor(Math.random() * 200);
+   300→      const backoffMs = base * 2 ** (attempt - 1) + jitter;
+   301→      await sleep(backoffMs);
+   302→    }
+   303→  }
+   304→
+   305→  if (lastResponse) return lastResponse;
+   306→  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+   307→}
+   308→
+   309→/** 剥离 MiniMax 等模型在 content 中嵌入的 <think>...</think> 思考块 */
+   310→const REASONING_TAG_NAMES = ["think", "thinking", "analysis", "reasoning", "thought"];
+   311→const REASONING_TAG_PATTERN = REASONING_TAG_NAMES.join("|");
+   312→
+   313→/** Remove model reasoning artifacts that may be embedded in assistant content. */
+   314→export function stripReasoningArtifacts(text: string): string {
+   315→  return stripReasoningArtifactsPreserveWhitespace(text).trim();
+   316→}
+   317→
+   318→function stripReasoningArtifactsPreserveWhitespace(text: string): string {
+   319→  if (!text) return text;
+   320→
+   321→  return text
+   322→    .replace(
+   323→      new RegExp(
+   324→        `<\\s*(${REASONING_TAG_PATTERN})\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*\\1\\s*>\\s*`,
+   325→        "gi"
+   326→      ),
+   327→      ""
+   328→    )
+   329→    .replace(new RegExp(`<\\s*\\/?\\s*(${REASONING_TAG_PATTERN})\\b[^>]*>`, "gi"), "");
+   330→}
+   331→
+   332→function findReasoningEnd(text: string): { end: number } | null {
+   333→  const match = new RegExp(`<\\s*\\/\\s*(${REASONING_TAG_PATTERN})\\s*>`, "i").exec(text);
+   334→  return match ? { end: match.index + match[0].length } : null;
+   335→}
+   336→
+   337→function couldBeReasoningStart(text: string): boolean {
+   338→  if (!text.startsWith("<")) return false;
+   339→  const lowered = text.toLowerCase();
+   340→  return REASONING_TAG_NAMES.some((name) => `<${name}`.startsWith(lowered) || lowered.startsWith(`<${name}`));
+   341→}
+   342→
+   343→export function stripMarkdownCodeFences(text: string): string {
+   344→  let t = text.trim();
+   345→
+   346→  if (t.startsWith("```")) {
+   347→    t = t.replace(/^```[a-zA-Z0-9_-]*\s*/m, "");
+   348→    t = t.replace(/\s*```\s*$/m, "");
+   349→  }
+   350→
+   351→  return t.trim();
+   352→}
+   353→
+   354→function stripJsonPrefix(text: string): string {
+   355→  const t = text.trimStart();
+   356→  if (/^json\s*[\[{]/i.test(t)) {
+   357→    return t.replace(/^json\s*/i, "");
+   358→  }
+   359→  return text;
+   360→}
+   361→
+   362→function extractFirstJsonBlock(text: string): string | null {
+   363→  const startObj = text.indexOf("{");
+   364→  const startArr = text.indexOf("[");
+   365→  const start =
+   366→    startObj === -1 ? startArr : startArr === -1 ? startObj : Math.min(startObj, startArr);
+   367→  if (start === -1) return null;
+   368→
+   369→  const opening = text[start];
+   370→  const expectedClosing = opening === "{" ? "}" : "]";
+   371→
+   372→  let i = start;
+   373→  let depth = 0;
+   374→  let inString = false;
+   375→  let escaping = false;
+   376→  for (; i < text.length; i += 1) {
+   377→    const ch = text[i];
+   378→
+   379→    if (inString) {
+   380→      if (escaping) {
+   381→        escaping = false;
+   382→        continue;
+   383→      }
+   384→      if (ch === "\\") {
+   385→        escaping = true;
+   386→        continue;
+   387→      }
+   388→      if (ch === '"') {
+   389→        inString = false;
+   390→      }
+   391→      continue;
+   392→    }
+   393→
+   394→    if (ch === '"') {
+   395→      inString = true;
+   396→      continue;
+   397→    }
+   398→    if (ch === opening) {
+   399→      depth += 1;
+   400→      continue;
+   401→    }
+   402→    if (ch === expectedClosing) {
+   403→      depth -= 1;
+   404→      if (depth === 0) {
+   405→        return text.slice(start, i + 1);
+   406→      }
+   407→      continue;
+   408→    }
+   409→
+   410→    if (opening === "{" && ch === "[") {
+   411→      depth += 1;
+   412→      continue;
+   413→    }
+   414→    if (opening === "{" && ch === "]") {
+   415→      depth = Math.max(0, depth - 1);
+   416→      if (depth === 0) {
+   417→        return text.slice(start, i + 1);
+   418→      }
+   419→      continue;
+   420→    }
+   421→    if (opening === "[" && ch === "{") {
+   422→      depth += 1;
+   423→      continue;
+   424→    }
+   425→    if (opening === "[" && ch === "}") {
+   426→      depth = Math.max(0, depth - 1);
+   427→      if (depth === 0) {
+   428→        return text.slice(start, i + 1);
+   429→      }
+   430→      continue;
+   431→    }
+   432→  }
+   433→
+   434→  return null;
+   435→}
+   436→
+   437→function normalizeJsonText(text: string): string {
+   438→  return text
+   439→    .replace(/[\u201C\u201D]/g, '"')
+   440→    .replace(/[\u2018\u2019]/g, "'")
+   441→    .replace(/,\s*([}\]])/g, "$1")
+   442→    .trim();
+   443→}
+   444→
+   445→function escapeDanglingQuotesInStrings(text: string): string {
+   446→  let out = "";
+   447→  let inString = false;
+   448→  let escaping = false;
+   449→
+   450→  const nextNonWs = (idx: number): string | null => {
+   451→    for (let j = idx; j < text.length; j += 1) {
+   452→      const c = text[j];
+   453→      if (!/\s/.test(c)) return c;
+   454→    }
+   455→    return null;
+   456→  };
+   457→
+   458→  for (let i = 0; i < text.length; i += 1) {
+   459→    const ch = text[i];
+   460→    if (!inString) {
+   461→      if (ch === '"') inString = true;
+   462→      out += ch;
+   463→      continue;
+   464→    }
+   465→
+   466→    if (escaping) {
+   467→      escaping = false;
+   468→      out += ch;
+   469→      continue;
+   470→    }
+   471→
+   472→    if (ch === "\\") {
+   473→      escaping = true;
+   474→      out += ch;
+   475→      continue;
+   476→    }
+   477→
+   478→    if (ch === '"') {
+   479→      const n = nextNonWs(i + 1);
+   480→      const isTerminator = n === null || n === "," || n === "}" || n === "]" || n === ":";
+   481→      if (isTerminator) {
+   482→        inString = false;
+   483→        out += ch;
+   484→        continue;
+   485→      }
+   486→      out += "\\\"";
+   487→      continue;
+   488→    }
+   489→
+   490→    out += ch;
+   491→  }
+   492→
+   493→  return out;
+   494→}
+   495→
+   496→function parseJsonTolerant<T>(raw: string): T {
+   497→  const trimmed = stripJsonPrefix(stripMarkdownCodeFences(raw));
+   498→  const repairedJson = parseLLMJson<T>(trimmed);
+   499→  if (repairedJson !== null) return repairedJson;
+   500→
+   501→  const direct = normalizeJsonText(trimmed);
+   502→  try {
+   503→    return JSON.parse(direct) as T;
+   504→  } catch {
+   505→    // continue
+   506→  }
+   507→
+   508→  const extracted = extractFirstJsonBlock(direct) ?? extractFirstJsonBlock(trimmed);
+   509→  if (!extracted) {
+   510→    throw new Error(`Failed to parse JSON response: ${raw}`);
+   511→  }
+   512→
+   513→  const normalized = normalizeJsonText(extracted);
+   514→  try {
+   515→    return JSON.parse(normalized) as T;
+   516→  } catch {
+   517→    // continue
+   518→  }
+   519→
+   520→  const repaired = escapeDanglingQuotesInStrings(normalized);
+   521→  try {
+   522→    return JSON.parse(repaired) as T;
+   523→  } catch {
+   524→    throw new Error(`Failed to parse JSON response: ${raw}`);
+   525→  }
+   526→}
+   527→
+   528→
+   529→export async function generateCompletion(
+   530→  options: GenerateOptions
+   531→): Promise<{ content: string; reasoning_details?: unknown; raw: ChatCompletionResponse }> {
+   532→  const maxTokens =
+   533→    typeof options.max_tokens === "number" && Number.isFinite(options.max_tokens)
+   534→      ? Math.max(16, Math.floor(options.max_tokens))
+   535→      : undefined;
+   536→
+   537→  const customEnabled = isCustomKeyEnabled();
+   538→  const modelToUse = customEnabled
+   539→    ? options.model
+   540→    : resolveModelForBuiltin(options.model);
+   541→  const headers: Record<string, string> = {
+   542→    "Content-Type": "application/json",
+   543→    ...buildCustomKeyHeaders(customEnabled),
+   544→  };
+   545→
+   546→  Object.assign(headers, await getAuthHeaders());
+   547→
+   548→  console.log("[LLM] generateCompletion:", {
+   549→    customEnabled,
+   550→    hasZenmuxKey: !!headers["X-Zenmux-Api-Key"],
+   551→    hasDashscopeKey: !!headers["X-Dashscope-Api-Key"],
+   552→    hasTokendanceKey: !!headers["X-Tokendance-Api-Key"],
+   553→    model: modelToUse,
+   554→  });
+   555→
+   556→  const response = await fetchWithRetry(
+   557→    "/api/chat",
+   558→    {
+   559→      method: "POST",
+   560→      headers: {
+   561→        ...headers,
+   562→      },
+   563→      body: JSON.stringify({
+   564→        model: modelToUse,
+   565→        ...(options.provider ? { provider: options.provider } : {}),
+   566→        messages: options.messages,
+   567→        temperature: options.temperature ?? 0.7,
+   568→        max_tokens: maxTokens,
+   569→        ...(options.reasoning ? { reasoning: options.reasoning } : {}),
+   570→        ...(options.reasoning_effort ? { reasoning_effort: options.reasoning_effort } : {}),
+   571→        ...(options.response_format ? { response_format: options.response_format } : {}),
+   572→      }),
+   573→    },
+   574→    4
+   575→  );
+   576→
+   577→  if (!response.ok) {
+   578→    const errorText = await response.text().catch(() => "");
+   579→    throw new Error(formatApiError(response.status, errorText));
+   580→  }
+   581→
+   582→  const result: ChatCompletionResponse = await response.json();
+   583→  const choice = result.choices?.[0];
+   584→  const assistantMessage = choice?.message;
+   585→
+   586→  if (!assistantMessage) {
+   587→    throw new Error(
+   588→      `No response from model. Raw response: ${JSON.stringify(result).slice(0, 500)}`
+   589→    );
+   590→  }
+   591→
+   592→  // Warn if output was truncated due to max_tokens
+   593→  if (choice.finish_reason === "length") {
+   594→    console.warn(
+   595→      `[LLM] Output truncated (finish_reason=length). Consider increasing max_tokens.`
+   596→    );
+   597→  }
+   598→
+   599→  // 统计 AI 调用
+   600→  const inputChars = options.messages.reduce((sum, m) => {
+   601→    if (typeof m.content === "string") return sum + m.content.length;
+   602→    if (Array.isArray(m.content)) {
+   603→      return sum + m.content.reduce((s, p) => s + ("text" in p ? p.text.length : 0), 0);
+   604→    }
+   605→    return sum;
+   606→  }, 0);
+   607→  gameStatsTracker.addAiCall({
+   608→    inputChars,
+   609→    outputChars: assistantMessage.content.length,
+   610→    promptTokens: result.usage?.prompt_tokens,
+   611→    completionTokens: result.usage?.completion_tokens,
+   612→  });
+   613→  gameSessionTracker.addAiCall({
+   614→    inputChars,
+   615→    outputChars: assistantMessage.content.length,
+   616→    promptTokens: result.usage?.prompt_tokens,
+   617→    completionTokens: result.usage?.completion_tokens,
+   618→  });
+   619→
+   620→  return {
+   621→    content: stripReasoningArtifacts(assistantMessage.content),
+   622→    reasoning_details: assistantMessage.reasoning_details,
+   623→    raw: result,
+   624→  };
+   625→}
+   626→
+   627→export async function generateCompletionBatch(
+   628→  requests: GenerateOptions[]
+   629→): Promise<BatchCompletionResult[]> {
+   630→  if (!Array.isArray(requests) || requests.length === 0) return [];
+   631→
+   632→  const customEnabled = isCustomKeyEnabled();
+   633→  const resolvedRequests = customEnabled
+   634→    ? requests
+   635→    : requests.map((r) => ({ ...r, model: resolveModelForBuiltin(r.model) }));
+   636→  const headers: Record<string, string> = {
+   637→    "Content-Type": "application/json",
+   638→    ...buildCustomKeyHeaders(customEnabled),
+   639→  };
+   640→
+   641→  Object.assign(headers, await getAuthHeaders());
+   642→
+   643→  const response = await fetchWithRetry(
+   644→    "/api/chat",
+   645→    {
+   646→      method: "POST",
+   647→      headers,
+   648→      body: JSON.stringify({ requests: resolvedRequests }),
+   649→    },
+   650→    3
+   651→  );
+   652→
+   653→  if (!response.ok) {
+   654→    const errorText = await response.text().catch(() => "");
+   655→    throw new Error(formatApiError(response.status, errorText));
+   656→  }
+   657→
+   658→  const data: unknown = await response.json();
+   659→  const results = isRecord(data) && Array.isArray(data.results) ? data.results : [];
+   660→
+   661→  return results.map((item): BatchCompletionResult => {
+   662→    if (!isRecord(item) || item.ok !== true) {
+   663→      return {
+   664→        ok: false,
+   665→        error: String(isRecord(item) ? (item.error ?? "Unknown error") : "Unknown error"),
+   666→        status: isRecord(item) && typeof item.status === "number" ? item.status : undefined,
+   667→      };
+   668→    }
+   669→    const raw = item.data as ChatCompletionResponse;
+   670→    const choice = raw?.choices?.[0];
+   671→    const assistantMessage = choice?.message;
+   672→    if (!assistantMessage) {
+   673→      return { ok: false, error: "No response from model" };
+   674→    }
+   675→    return {
+   676→      ok: true,
+   677→      content: stripReasoningArtifacts(assistantMessage.content),
+   678→      reasoning_details: assistantMessage.reasoning_details,
+   679→      raw,
+   680→    };
+   681→  });
+   682→}
+   683→
+   684→export async function* generateCompletionStream(
+   685→  options: GenerateOptions
+   686→): AsyncGenerator<string, void, unknown> {
+   687→  const maxTokens =
+   688→    typeof options.max_tokens === "number" && Number.isFinite(options.max_tokens)
+   689→      ? Math.max(16, Math.floor(options.max_tokens))
+   690→      : undefined;
+   691→
+   692→  const customEnabled = isCustomKeyEnabled();
+   693→  const modelToUse = customEnabled
+   694→    ? options.model
+   695→    : resolveModelForBuiltin(options.model);
+   696→  const headers: Record<string, string> = {
+   697→    "Content-Type": "application/json",
+   698→    ...buildCustomKeyHeaders(customEnabled),
+   699→  };
+   700→
+   701→  Object.assign(headers, await getAuthHeaders());
+   702→
+   703→  const response = await fetchWithRetry(
+   704→    "/api/chat",
+   705→    {
+   706→      method: "POST",
+   707→      headers: {
+   708→        ...headers,
+   709→      },
+   710→      body: JSON.stringify({
+   711→        model: modelToUse,
+   712→        ...(options.provider ? { provider: options.provider } : {}),
+   713→        messages: options.messages,
+   714→        temperature: options.temperature ?? 0.7,
+   715→        max_tokens: maxTokens,
+   716→        stream: true,
+   717→        ...(options.reasoning ? { reasoning: options.reasoning } : {}),
+   718→        ...(options.reasoning_effort ? { reasoning_effort: options.reasoning_effort } : {}),
+   719→        ...(options.response_format ? { response_format: options.response_format } : {}),
+   720→      }),
+   721→    },
+   722→    4
+   723→  );
+   724→
+   725→  if (!response.ok) {
+   726→    const errorText = await response.text().catch(() => "");
+   727→    throw new Error(formatApiError(response.status, errorText));
+   728→  }
+   729→
+   730→  const reader = response.body?.getReader();
+   731→  if (!reader) {
+   732→    throw new Error("No response body");
+   733→  }
+   734→
+   735→  const decoder = new TextDecoder();
+   736→  let buffer = "";
+   737→  let totalOutputChars = 0;
+   738→
+   739→  // <think> 块剥离状态机（用于 MiniMax 等把思考嵌在 content 里的模型）
+   740→  let thinkStripped = false;
+   741→  let thinkBuffer = "";
+   742→
+   743→  // 计算输入字符数
+   744→  const inputChars = options.messages.reduce((sum, m) => {
+   745→    if (typeof m.content === "string") return sum + m.content.length;
+   746→    if (Array.isArray(m.content)) {
+   747→      return sum + m.content.reduce((s, p) => s + ("text" in p ? p.text.length : 0), 0);
+   748→    }
+   749→    return sum;
+   750→  }, 0);
+   751→
+   752→  while (true) {
+   753→    const { done, value } = await reader.read();
+   754→    if (done) break;
+   755→
+   756→    buffer += decoder.decode(value, { stream: true });
+   757→    const lines = buffer.split("\n");
+   758→    buffer = lines.pop() || "";
+   759→
+   760→    for (const line of lines) {
+   761→      const trimmed = line.trim();
+   762→      if (!trimmed || trimmed === "data: [DONE]") continue;
+   763→      if (!trimmed.startsWith("data: ")) continue;
+   764→
+   765→      try {
+   766→        const json = JSON.parse(trimmed.slice(6));
+   767→        const delta = json.choices?.[0]?.delta?.content;
+   768→        if (delta) {
+   769→          if (thinkStripped) {
+   770→            const cleaned = stripReasoningArtifactsPreserveWhitespace(delta);
+   771→            totalOutputChars += cleaned.length;
+   772→            if (cleaned) yield cleaned;
+   773→          } else {
+   774→            thinkBuffer += delta;
+   775→            const reasoningEnd = findReasoningEnd(thinkBuffer);
+   776→            if (reasoningEnd) {
+   777→              // 找到 </think>，丢弃之前内容，从之后开始输出
+   778→              const after = stripReasoningArtifactsPreserveWhitespace(thinkBuffer.slice(reasoningEnd.end).replace(/^\n+/, ""));
+   779→              thinkStripped = true;
+   780→              thinkBuffer = "";
+   781→              if (after) {
+   782→                totalOutputChars += after.length;
+   783→                yield after;
+   784→              }
+   785→            } else if (!couldBeReasoningStart(thinkBuffer) && thinkBuffer.length >= 1) {
+   786→              // 确认不是 <think> 块，直接透传
+   787→              thinkStripped = true;
+   788→              const cleaned = stripReasoningArtifactsPreserveWhitespace(thinkBuffer);
+   789→              totalOutputChars += cleaned.length;
+   790→              if (cleaned) yield cleaned;
+   791→              thinkBuffer = "";
+   792→            }
+   793→            // 否则继续缓冲，等待 </think> 或确认非 think 块
+   794→          }
+   795→        }
+   796→      } catch {
+   797→        // Skip malformed JSON
+   798→      }
+   799→    }
+   800→  }
+   801→
+   802→  // 流式结束后统计 AI 调用
+   803→  gameStatsTracker.addAiCall({
+   804→    inputChars,
+   805→    outputChars: totalOutputChars,
+   806→  });
+   807→  gameSessionTracker.addAiCall({
+   808→    inputChars,
+   809→    outputChars: totalOutputChars,
+   810→  });
+   811→}
+   812→
+   813→export async function generateJSON<T>(
+   814→  options: GenerateOptions & { schema?: string }
+   815→): Promise<T> {
+   816→  const messagesWithFormat = [...options.messages];
+   817→
+   818→  const lastMessage = messagesWithFormat[messagesWithFormat.length - 1];
+   819→  if (lastMessage && lastMessage.role === "user") {
+   820→    const suffix =
+   821→      "\n\nRespond with valid JSON only. No markdown, no code blocks, just raw JSON. If you need to include double quotes inside string values, escape them as \\\".";
+   822→    if (typeof lastMessage.content === "string") {
+   823→      lastMessage.content += suffix;
+   824→    } else if (Array.isArray(lastMessage.content)) {
+   825→      const parts = lastMessage.content;
+   826→      const lastPart = parts[parts.length - 1];
+   827→      if (lastPart && lastPart.type === "text") {
+   828→        lastPart.text += suffix;
+   829→      } else {
+   830→        parts.push({ type: "text", text: suffix });
+   831→      }
+   832→    }
+   833→  }
+   834→
+   835→  const shouldForceJsonObject =
+   836→    !options.response_format && getProviderForModel(options.model) === "zenmux";
+   837→
+   838→  const result = await generateCompletion({
+   839→    ...options,
+   840→    ...(shouldForceJsonObject ? { response_format: { type: "json_object" as const } } : {}),
+   841→    messages: messagesWithFormat,
+   842→  });
+   843→
+   844→  try {
+   845→    return parseJsonTolerant<T>(result.content);
+   846→  } catch (firstError) {
+   847→    const retryMessages: LLMMessage[] = [
+   848→      ...messagesWithFormat,
+   849→      { role: "assistant", content: result.content.slice(0, 4000) },
+   850→      {
+   851→        role: "user",
+   852→        content: "The previous response was not valid JSON for the requested schema. Return valid JSON only, with no markdown and no extra text.",
+   853→      },
+   854→    ];
+   855→
+   856→    const retryResult = await generateCompletion({
+   857→      ...options,
+   858→      ...(shouldForceJsonObject ? { response_format: { type: "json_object" as const } } : {}),
+   859→      messages: retryMessages,
+   860→    });
+   861→
+   862→    try {
+   863→      return parseJsonTolerant<T>(retryResult.content);
+   864→    } catch {
+   865→      throw firstError;
+   866→    }
+   867→  }
+   868→}
+   869→
