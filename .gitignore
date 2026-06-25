@@ -53,3 +53,4 @@ server.log
 # Skills directory
 /skills/mobile-*.png
 *.png
+tool-results/
