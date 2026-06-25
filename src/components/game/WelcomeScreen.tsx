@@ -103,7 +103,7 @@ export function WelcomeScreen({
   };
 
   return (
-    <div className="relative min-h-screen w-full overflow-hidden bg-gradient-to-b from-[#1a1410] via-[#2a1f17] to-[#0f0c0a] text-stone-100">
+    <div className="relative flex min-h-screen w-full flex-col bg-gradient-to-b from-[#1a1410] via-[#2a1f17] to-[#0f0c0a] text-stone-100">
       {/* Ambient decorative glows */}
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute -left-32 top-10 h-96 w-96 rounded-full bg-amber-500/10 blur-3xl" />
@@ -135,7 +135,7 @@ export function WelcomeScreen({
       </header>
 
       {/* Main content */}
-      <main className="relative z-10 mx-auto flex w-full max-w-3xl flex-col items-center px-4 pb-16 pt-6 sm:pt-10">
+      <main className="relative z-10 mx-auto flex w-full max-w-3xl flex-col items-center px-4 pb-12 pt-4 sm:pb-16 sm:pt-10">
         {/* Hero */}
         <motion.div
           initial={{ opacity: 0, y: 16 }}
@@ -143,15 +143,15 @@ export function WelcomeScreen({
           transition={{ duration: 0.5, ease: "easeOut" }}
           className="flex flex-col items-center text-center"
         >
-          <div className="mb-4 flex items-center gap-2 rounded-full border border-amber-500/20 bg-amber-500/5 px-3 py-1 text-xs text-amber-200">
+          <div className="mb-3 flex items-center gap-2 rounded-full border border-amber-500/20 bg-amber-500/5 px-3 py-1 text-xs text-amber-200 sm:mb-4">
             <Sparkle weight="fill" className="h-3.5 w-3.5" />
             <span>AI Werewolf · 一个人也能玩的狼人杀</span>
           </div>
 
-          <h1 className="bg-gradient-to-b from-white to-stone-300 bg-clip-text text-4xl font-black tracking-tight text-transparent sm:text-5xl">
+          <h1 className="bg-gradient-to-b from-white to-stone-300 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-5xl">
             猹杀 · Wolfcha
           </h1>
-          <p className="mt-3 max-w-xl text-sm leading-relaxed text-stone-400 sm:text-base">
+          <p className="mt-2 hidden max-w-xl text-sm leading-relaxed text-stone-400 sm:mt-3 sm:block sm:text-base">
             全 AI 对手实时发言、怀疑、带节奏与投票。双层 AI 扮演机制，每一局都充满不确定性。
             由 z.ai 大模型驱动，打开浏览器即可开局。
           </p>
@@ -162,10 +162,10 @@ export function WelcomeScreen({
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.1, ease: "easeOut" }}
-          className="mt-8 w-full rounded-2xl border border-white/10 bg-white/[0.03] p-5 backdrop-blur-sm sm:p-6"
+          className="mt-5 w-full rounded-2xl border border-white/10 bg-white/[0.03] p-4 backdrop-blur-sm sm:mt-8 sm:p-6"
         >
           {/* Name input */}
-          <div className="mb-5">
+          <div className="mb-4 sm:mb-5">
             <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-stone-400">
               {locale === "zh" ? "你的名字" : "Your Name"}
             </label>
@@ -179,7 +179,7 @@ export function WelcomeScreen({
           </div>
 
           {/* Player count */}
-          <div className="mb-5">
+          <div className="mb-4 sm:mb-5">
             <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-stone-400">
               {t("gameSetup.playerCountLabel")}
             </label>
@@ -209,7 +209,7 @@ export function WelcomeScreen({
           </div>
 
           {/* Difficulty */}
-          <div className="mb-5">
+          <div className="mb-4 sm:mb-5">
             <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-stone-400">
               {t("gameSetup.difficultyLabel")}
             </label>
@@ -238,7 +238,7 @@ export function WelcomeScreen({
           </div>
 
           {/* Preferred role */}
-          <div className="mb-6">
+          <div className="mb-5 sm:mb-6">
             <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-stone-400">
               {locale === "zh" ? "身份偏好" : "Role Preference"}
               <span className="ml-2 normal-case text-stone-500">
@@ -313,7 +313,7 @@ export function WelcomeScreen({
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.2, ease: "easeOut" }}
-          className="mt-8 grid w-full grid-cols-1 gap-3 sm:grid-cols-3"
+          className="mt-6 hidden w-full grid-cols-1 gap-3 sm:mt-8 sm:grid sm:grid-cols-3"
         >
           {[
             {

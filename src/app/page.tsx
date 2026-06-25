@@ -1253,7 +1253,7 @@ export default function Home() {
   const isWelcomeStage = !gameStarted;
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-transparent">
+    <div className={isWelcomeStage ? "min-h-screen flex flex-col bg-transparent" : "h-screen flex flex-col overflow-hidden bg-transparent"}>
       <GameBackground isNight={visualIsNight} isBlinking={!!dayNightBlinkPhase} />
 
       <motion.div
@@ -1298,7 +1298,7 @@ export default function Home() {
             animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
             exit={{ opacity: 0, y: -10, filter: "blur(10px)" }}
             transition={{ duration: 0.45, ease: "easeOut" }}
-            className="h-full w-full"
+            className="min-h-screen w-full"
           >
             <WelcomeScreen
               humanName={humanName}
