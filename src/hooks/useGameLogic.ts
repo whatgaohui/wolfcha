@@ -1846,8 +1846,11 @@ export function useGameLogic() {
 
     const baseState = baseState0;
     if (baseState.phase !== "DAY_VOTE" && baseState.phase !== "DAY_BADGE_ELECTION") return;
-    const targetPlayer = baseState.players.find((p) => p.seat === targetSeat);
-    if (!targetPlayer || !targetPlayer.alive) return;
+    // targetSeat === -1 表示弃票,跳过目标校验
+    if (targetSeat !== -1) {
+      const targetPlayer = baseState.players.find((p) => p.seat === targetSeat);
+      if (!targetPlayer || !targetPlayer.alive) return;
+    }
 
     if (baseState.phase === "DAY_BADGE_ELECTION") {
       if (typeof baseState.badge.votes?.[humanPlayer.playerId] === "number") return;
@@ -1873,7 +1876,8 @@ export function useGameLogic() {
     }
 
     if (typeof baseState.votes[humanPlayer.playerId] === "number") return;
-    if (baseState.pkSource === "vote" && Array.isArray(baseState.pkTargets) && baseState.pkTargets.length > 0) {
+    // 弃票(-1)跳过 PK 目标检查;非弃票时需在 PK 目标列表内
+    if (targetSeat !== -1 && baseState.pkSource === "vote" && Array.isArray(baseState.pkTargets) && baseState.pkTargets.length > 0) {
       if (!baseState.pkTargets.includes(targetSeat)) {
         console.warn("[wolfcha] Vote target not in PK list");
         return;

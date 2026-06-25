@@ -95,9 +95,11 @@ function buildGameContext(
   humanName: string,
   roleLabel: string
 ): GameContext {
+  // 游戏内部 seat 从 0 开始,但 UI 显示用 seat+1(1-10)。
+  // AI 助手统一用 1-based seat,和游戏桌面显示一致,避免序号错位。
   const players = gameState.players.map((p) => ({
-    seat: p.seat,
-    name: p.displayName || `玩家${p.seat}`,
+    seat: p.seat + 1,
+    name: p.displayName || `玩家${p.seat + 1}`,
     alive: p.alive,
     isHuman: p.isHuman,
   }));
@@ -108,7 +110,7 @@ function buildGameContext(
       const speaker = gameState.players.find((p) => p.playerId === m.playerId);
       return {
         speaker: m.playerName,
-        speakerSeat: speaker?.seat ?? 0,
+        speakerSeat: (speaker?.seat ?? 0) + 1,
         content: m.content,
         day: m.day ?? 1,
         phase: m.phase ?? "DAY_SPEECH",
@@ -130,8 +132,8 @@ function buildGameContext(
       if (voter && target) {
         votes.push({
           voter: voter.displayName,
-          voterSeat: voter.seat,
-          targetSeat,
+          voterSeat: voter.seat + 1,
+          targetSeat: targetSeat + 1,
           targetName: target.displayName,
           day,
         });
@@ -148,7 +150,7 @@ function buildGameContext(
           const player = gameState.players.find((p) => p.seat === d.seat);
           if (player) {
             nightDeaths.push({
-              seat: d.seat,
+              seat: d.seat + 1,
               name: player.displayName,
               day,
               reason: d.reason === "wolf" ? "狼人击杀" : d.reason === "poison" ? "女巫毒杀" : "其他",
@@ -162,7 +164,7 @@ function buildGameContext(
   let seerChecks: Array<{ targetSeat: number; isWolf: boolean; day: number }> | undefined;
   if (humanPlayer?.role === "Seer" && gameState.nightActions.seerHistory) {
     seerChecks = gameState.nightActions.seerHistory.map((h) => ({
-      targetSeat: h.targetSeat,
+      targetSeat: h.targetSeat + 1,
       isWolf: h.isWolf,
       day: h.day,
     }));
@@ -170,7 +172,7 @@ function buildGameContext(
 
   return {
     myRole: roleLabel,
-    mySeat: humanPlayer?.seat ?? 0,
+    mySeat: (humanPlayer?.seat ?? 0) + 1,
     myName: humanName,
     day: gameState.day,
     phase: gameState.phase,
@@ -232,6 +234,19 @@ export function AIAssistPanel({
     }
     return map;
   }, [gameContext]);
+
+  // 分析结果按 seat 排序,并用 gameContext 的 name 校正(LLM 可能返回错位 name)
+  const sortedAnalysisPlayers = useMemo(() => {
+    if (typeof analysis !== "object" || !analysis.players) return [];
+    const playerMap = new Map(gameContext.players.map((p) => [p.seat, p.name]));
+    return [...analysis.players]
+      .filter((p) => p.seat !== gameContext.mySeat)
+      .sort((a, b) => a.seat - b.seat)
+      .map((p) => ({
+        ...p,
+        name: playerMap.get(p.seat) || p.name, // 以 gameContext 为准
+      }));
+  }, [analysis, gameContext]);
 
   const callAPI = useCallback(
     async (type: Tab) => {
@@ -354,7 +369,7 @@ export function AIAssistPanel({
                     <>
                       {/* 可视化:每个玩家的身份概率条 */}
                       <div className="space-y-3">
-                        {analysis.players.map((p) => (
+                        {sortedAnalysisPlayers.map((p) => (
                           <div
                             key={p.seat}
                             className="rounded-lg border border-white/15 bg-white/5 p-3.5"

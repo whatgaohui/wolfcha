@@ -1162,7 +1162,13 @@ export default function Home() {
       await handleNightAction(-1);
       return;
     }
-    
+
+    // 特殊处理：投票弃票（当在投票阶段且没有选择目标时）
+    if ((phase === "DAY_VOTE" || phase === "DAY_BADGE_ELECTION") && selectedSeat === null && humanPlayer?.alive) {
+      await handleHumanVote(-1);
+      return;
+    }
+
     if (selectedSeat === null) return;
     
     // 保存选中的座位号，然后立即清除选择状态，避免确认对话框重新渲染

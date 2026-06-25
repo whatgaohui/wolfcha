@@ -661,7 +661,9 @@
     "confirmAction": {
       "whiteWolfKingBoom": "Self-destruct & take #{seat}",
       "whiteWolfKingBoomBtn": "Self-destruct"
-    }
+    },
+    "abstain": "Abstain",
+    "clickToVote": "Tap a player to vote"
   },
   "mentions": {
     "playerLabel": "Seat {seat} {name}",

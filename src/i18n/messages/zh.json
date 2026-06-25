@@ -661,7 +661,9 @@
     "confirmAction": {
       "whiteWolfKingBoom": "自爆带走 {seat}号",
       "whiteWolfKingBoomBtn": "自爆"
-    }
+    },
+    "abstain": "弃票",
+    "clickToVote": "点击玩家投票"
   },
   "mentions": {
     "playerLabel": "{seat}号 {name}",
