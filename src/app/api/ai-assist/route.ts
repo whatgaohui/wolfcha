@@ -102,20 +102,32 @@ ${seerChecks ? `【你的查验记录(仅你可见)】\n${seerChecks}` : ""}
 【任务】
 站在 ${ctx.myName}(${ctx.myRole})的立场,分析场上每个其他玩家的身份可能性。
 
-输出格式(Markdown):
-对每个其他玩家,给出:
-- **N号 名字**: 身份判断
-  - 可能身份: XX(概率XX%) / XX(概率XX%) / XX(概率XX%)
-  - 判断依据: 一句话说明为什么(引用具体发言/投票/行为)
-  - 可信度: 高/中/低
-
-最后给一段【局势总结】:场上狼人剩余估计、好人阵营优势/劣势、关键悬念。
+【输出要求】
+必须输出严格的 JSON 对象(不要 markdown 代码块,不要解释文字),格式如下:
+{
+  "players": [
+    {
+      "seat": 2,
+      "name": "玩家名字",
+      "identities": [
+        { "role": "村民", "probability": 40 },
+        { "role": "狼人", "probability": 35 },
+        { "role": "神职", "probability": 25 }
+      ],
+      "reason": "一句话判断依据,引用具体发言/投票/行为",
+      "confidence": "高"
+    }
+  ],
+  "summary": "局势总结:狼人剩余估计、好人优劣、关键悬念(2-3句)"
+}
 
 注意:
-- 概率要合理分配(总和接近100%)
-- 基于发言和行为推断,不要凭空猜测
-- 如果信息不足,如实说明"信息不足,暂难判断"
-- 简洁,每个玩家3-4行`;
+- players 数组只包含"其他玩家"(不含 ${ctx.mySeat}号 ${ctx.myName} 自己)
+- seat 和 name 必须与上面【场上玩家】列表完全一致
+- identities 的 probability 之和接近 100
+- confidence 只能是 "高"、"中"、"低" 之一
+- 如果信息不足,probability 均分,reason 写"信息不足,暂难判断",confidence 写"低"
+- 只输出 JSON,不要其他文字`;
 }
 
 function buildSpeechPrompt(ctx: GameContext, analysis: string): string {
@@ -189,6 +201,25 @@ export async function POST(req: NextRequest) {
     });
 
     const content = result?.choices?.[0]?.message?.content || "(AI 助手未返回内容)";
+
+    // analyze 模式: 尝试解析为 JSON,失败则返回纯文本(前端会 fallback)
+    if (type === "analyze") {
+      let parsed: unknown = null;
+      try {
+        // 剥离可能的 markdown code fence
+        let cleaned = content.trim();
+        if (cleaned.startsWith("```")) {
+          cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "");
+        }
+        parsed = JSON.parse(cleaned);
+      } catch {
+        // 解析失败,保留原文
+      }
+      if (parsed && typeof parsed === "object" && Array.isArray((parsed as { players?: unknown }).players)) {
+        return NextResponse.json({ result: parsed });
+      }
+      return NextResponse.json({ result: content });
+    }
 
     return NextResponse.json({ result: content });
   } catch (error: unknown) {
