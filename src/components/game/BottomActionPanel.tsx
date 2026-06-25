@@ -62,9 +62,13 @@ export function BottomActionPanel({
         {/* 选择确认 (投票/夜间行动) */}
         {(() => {
           const isRevealedIdiot = humanPlayer?.role === "Idiot" && gameState.roleAbilities.idiotRevealed;
-          const isCorrectRoleForPhase = 
+          // 警徽选举:候选人不能投票;非候选人且未投过票才能投
+          const badgeCandidates = gameState.badge.candidates || [];
+          const isBadgeCandidate = badgeCandidates.includes(humanPlayer?.seat ?? -1);
+          const hasBadgeVoted = humanPlayer ? typeof gameState.badge.votes?.[humanPlayer.playerId] === "number" : false;
+          const isCorrectRoleForPhase =
             (phase === "DAY_VOTE" && humanPlayer?.alive && !isRevealedIdiot) ||
-            (phase === "DAY_BADGE_ELECTION" && humanPlayer?.alive) ||
+            (phase === "DAY_BADGE_ELECTION" && humanPlayer?.alive && !isBadgeCandidate && !hasBadgeVoted && badgeCandidates.length > 0) ||
             (phase === "NIGHT_SEER_ACTION" && humanPlayer?.role === "Seer" && humanPlayer?.alive && gameState.nightActions.seerTarget === undefined) ||
             (phase === "NIGHT_WOLF_ACTION" && humanPlayer && isWolfRole(humanPlayer.role) && humanPlayer.alive) ||
             (phase === "NIGHT_GUARD_ACTION" && humanPlayer?.role === "Guard" && humanPlayer?.alive) ||
@@ -227,6 +231,41 @@ export function BottomActionPanel({
             </button>
           </motion.div>
         )}
+
+        {/* 投票弃票 — 投票阶段未选人时可弃票 */}
+        {(phase === "DAY_VOTE" || phase === "DAY_BADGE_ELECTION") && humanPlayer?.alive && !isWaitingForAI && selectedSeat === null && (() => {
+          const isRevealedIdiot = humanPlayer?.role === "Idiot" && gameState.roleAbilities.idiotRevealed;
+          if (isRevealedIdiot) return null;
+          // 警徽选举:候选人不投票;已投过票的不显示
+          if (phase === "DAY_BADGE_ELECTION") {
+            const cands = gameState.badge.candidates || [];
+            if (cands.includes(humanPlayer.seat)) return null;
+            if (typeof gameState.badge.votes?.[humanPlayer.playerId] === "number") return null;
+            if (cands.length === 0) return null;
+          }
+          return (
+            <motion.div
+              key="vote-abstain"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="wc-bottom-action-row flex gap-2 w-full items-center"
+            >
+              <div className={`flex-1 flex items-center justify-center h-10 rounded-md text-xs px-2 ${neutralCardClass}`}>
+                <span className="flex items-center gap-1">
+                  <CaretRight size={14} /> {t("bottomAction.clickToVote")}
+                </span>
+              </div>
+              <button
+                onClick={onConfirmAction}
+                className={`inline-flex items-center justify-center gap-2 h-10 text-sm font-medium rounded-sm cursor-pointer active:scale-[0.98] transition-all duration-150 flex-1 ${neutralButtonClass}`}
+              >
+                <X size={16} />
+                {t("bottomAction.abstain")}
+              </button>
+            </motion.div>
+          );
+        })()}
 
         {/* 游戏结束 */}
         {phase === "GAME_END" && (

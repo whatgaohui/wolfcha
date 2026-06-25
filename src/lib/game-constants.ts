@@ -18,23 +18,23 @@ export const GAME_CONFIG = {
 /** 延迟时间配置（毫秒） */
 export const DELAY_CONFIG = {
   /** 短延迟 - 状态切换 */
-  SHORT: 300,
+  SHORT: 150,
   /** 中等延迟 - 阶段过渡 */
-  MEDIUM: 800,
+  MEDIUM: 400,
   /** 长延迟 - 重要事件 */
-  LONG: 1200,
+  LONG: 600,
   /** 对话显示延迟 */
-  DIALOGUE: 900,
+  DIALOGUE: 450,
   /** 夜晚结算延迟 */
-  NIGHT_RESOLVE: 1000,
-  NIGHT_PHASE_GAP: 2000,
-  NIGHT_ROLE_ANIMATION_MIN: 2000,
-  NIGHT_ROLE_ANIMATION_MAX: 4000,
+  NIGHT_RESOLVE: 600,
+  NIGHT_PHASE_GAP: 1000,
+  NIGHT_ROLE_ANIMATION_MIN: 1000,
+  NIGHT_ROLE_ANIMATION_MAX: 2000,
   /** 开局显示桌面延迟 */
-  SHOW_TABLE: 2400,
+  SHOW_TABLE: 1200,
   /** AI 随机延迟范围 */
-  AI_MIN: 500,
-  AI_MAX: 1200,
+  AI_MIN: 300,
+  AI_MAX: 700,
 } as const;
 
 /** 角色配置 */
