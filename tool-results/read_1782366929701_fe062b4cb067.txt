@@ -1,0 +1,810 @@
+     1→import { generateJSON, generateCompletionStream, stripMarkdownCodeFences } from "./llm";
+     2→import {
+     3→  ALL_MODELS,
+     4→  GENERATOR_MODEL,
+     5→  PLAYER_MODELS,
+     6→  PROJECT_MODELS,
+     7→  filterPlayerModels,
+     8→  type GameScenario,
+     9→  type ModelRef,
+    10→  type Persona,
+    11→  type PlayerMind,
+    12→} from "@/types/game";
+    13→import {
+    14→  getGeneratorModel,
+    15→  getSelectedModels,
+    16→  isCustomKeyEnabled,
+    17→} from "@/lib/api-keys";
+    18→import { aiLogger } from "./ai-logger";
+    19→import { GAME_TEMPERATURE } from "./ai-config";
+    20→import { getRandomScenario } from "./scenarios";
+    21→import { resolveVoiceId, VOICE_PRESETS, type AppLocale } from "./voice-constants";
+    22→import { getI18n } from "@/i18n/translator";
+    23→import { parseLLMJson } from "./llm-json";
+    24→
+    25→export interface GeneratedCharacter {
+    26→  displayName: string;
+    27→  persona: Persona;
+    28→  playerMind?: PlayerMind;
+    29→  avatarSeed?: string;
+    30→}
+    31→
+    32→export interface GeneratedCharacters {
+    33→  characters: GeneratedCharacter[];
+    34→}
+    35→
+    36→export type Gender = "male" | "female" | "nonbinary";
+    37→
+    38→const MODEL_DISPLAY_NAME_MAP: Array<{ match: RegExp; label: string }> = [
+    39→  { match: /gemini/i, label: "Gemini" },
+    40→  { match: /deepseek/i, label: "DeepSeek" },
+    41→  { match: /claude/i, label: "Claude" },
+    42→  { match: /qwen/i, label: "Qwen" },
+    43→  { match: /doubao/i, label: "Doubao" },
+    44→  { match: /bytedance|seed/i, label: "ByteDance" },
+    45→  { match: /openai|gpt/i, label: "OpenAI" },
+    46→  { match: /kimi|moonshot/i, label: "Kimi" },
+    47→];
+    48→
+    49→const CHARACTER_GENERATOR_REASONING = { enabled: false } as const;
+    50→
+    51→function shuffleArray<T>(array: T[]): T[] {
+    52→  const shuffled = [...array];
+    53→  for (let i = shuffled.length - 1; i > 0; i--) {
+    54→    const j = Math.floor(Math.random() * (i + 1));
+    55→    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    56→  }
+    57→  return shuffled;
+    58→}
+    59→
+    60→function getModelRefForModel(model: string): ModelRef {
+    61→  return (
+    62→    PROJECT_MODELS.find((ref) => ref.model === model) ??
+    63→    ALL_MODELS.find((ref) => ref.model === model) ??
+    64→    { provider: "zai" as const, model }
+    65→  );
+    66→}
+    67→
+    68→export const sampleModelRefs = (count: number): ModelRef[] => {
+    69→  // Default pool when custom key is not enabled
+    70→  const defaultPool =
+    71→    PLAYER_MODELS.length > 0
+    72→      ? PLAYER_MODELS
+    73→      : [getModelRefForModel(GENERATOR_MODEL)];
+    74→
+    75→  const pool = (() => {
+    76→    if (!isCustomKeyEnabled()) return defaultPool;
+    77→
+    78→    // When custom key is enabled, use ALL_MODELS as the full available pool
+    79→    const fullPool = ALL_MODELS.length > 0 ? ALL_MODELS : defaultPool;
+    80→
+    81→    const allowedProviders = new Set<ModelRef["provider"]>();
+    82→    allowedProviders.add("zai");
+    83→    if (allowedProviders.size === 0) return defaultPool;
+    84→
+    85→    // Filter by allowed providers, then exclude non-player models
+    86→    const allowedPool = filterPlayerModels(
+    87→      fullPool.filter((ref) => allowedProviders.has(ref.provider))
+    88→    );
+    89→    if (allowedPool.length === 0) return defaultPool;
+    90→
+    91→    // Filter by user's selected models - STRICTLY respect user selection
+    92→    const selectedModels = getSelectedModels();
+    93→    if (selectedModels.length === 0) return allowedPool;
+    94→    
+    95→    // Only use models the user explicitly selected
+    96→    const selectedPool = allowedPool.filter((ref) => selectedModels.includes(ref.model));
+    97→    
+    98→    // If user selected models but none are in allowedPool, try to find them in fullPool
+    99→    // This handles cases where user selected models from a different provider
+   100→    if (selectedPool.length === 0) {
+   101→      const fullSelectedPool = filterPlayerModels(
+   102→        fullPool.filter((ref) => selectedModels.includes(ref.model) && allowedProviders.has(ref.provider))
+   103→      );
+   104→      if (fullSelectedPool.length > 0) return fullSelectedPool;
+   105→      
+   106→      // Last resort: only return models that user actually selected, even if empty
+   107→      // This prevents using models the user didn't choose
+   108→      console.warn("[sampleModelRefs] User selected models not found in allowed pool:", selectedModels);
+   109→    }
+   110→    
+   111→    // Return only user-selected models, never fall back to all models
+   112→    return selectedPool.length > 0 ? selectedPool : allowedPool.slice(0, 1);
+   113→  })();
+   114→
+   115→  if (!Number.isFinite(count) || count <= 0) return [];
+   116→
+   117→  if (count <= pool.length) {
+   118→    return shuffleArray(pool).slice(0, count);
+   119→  }
+   120→
+   121→  const out = shuffleArray(pool);
+   122→  while (out.length < count) {
+   123→    out.push(pool[Math.floor(Math.random() * pool.length)]);
+   124→  }
+   125→  return out;
+   126→};
+   127→
+   128→const getModelDisplayName = (modelRef: ModelRef): string => {
+   129→  const raw = modelRef.model ?? "";
+   130→  const mapped = MODEL_DISPLAY_NAME_MAP.find((entry) => entry.match.test(raw))?.label;
+   131→  if (mapped) return mapped;
+   132→  const fallback = raw.split("/").pop() ?? raw;
+   133→  return fallback.split("-")[0] || fallback || "AI";
+   134→};
+   135→
+   136→const createGenshinPersona = (voiceId?: string): Persona => {
+   137→  return {
+   138→    styleLabel: "neutral",
+   139→    voiceRules: ["concise"],
+   140→    mbti: "NA",
+   141→    gender: "nonbinary",
+   142→    age: 0,
+   143→    voiceId,
+   144→  };
+   145→};
+   146→
+   147→export const buildGenshinModelRefs = (count: number): ModelRef[] => {
+   148→  return sampleModelRefs(count);
+   149→};
+   150→
+   151→export const generateGenshinModeCharacters = async (
+   152→  count: number,
+   153→  modelRefs: ModelRef[]
+   154→): Promise<GeneratedCharacter[]> => {
+   155→  const modelUsageCounts = new Map<string, number>();
+   156→  const modelVoiceMap = new Map<string, string>();
+   157→  const resolvedRefs = modelRefs.length >= count ? modelRefs : buildGenshinModelRefs(count);
+   158→
+   159→  return resolvedRefs.slice(0, count).map((modelRef) => {
+   160→    const modelLabel = getModelDisplayName(modelRef);
+   161→    const usageCount = modelUsageCounts.get(modelLabel) ?? 0;
+   162→    modelUsageCounts.set(modelLabel, usageCount + 1);
+   163→    const preferredName = usageCount === 0 ? modelLabel : `${modelLabel} ${usageCount + 1}`;
+   164→
+   165→    let voiceId = modelVoiceMap.get(modelLabel);
+   166→    if (!voiceId) {
+   167→      const preset = VOICE_PRESETS[Math.floor(Math.random() * VOICE_PRESETS.length)];
+   168→      voiceId = preset?.id;
+   169→      if (voiceId) {
+   170→        modelVoiceMap.set(modelLabel, voiceId);
+   171→      }
+   172→    }
+   173→
+   174→    return {
+   175→      displayName: preferredName,
+   176→      persona: createGenshinPersona(voiceId),
+   177→    };
+   178→  });
+   179→};
+   180→
+   181→function isRecord(value: unknown): value is Record<string, unknown> {
+   182→  return !!value && typeof value === "object";
+   183→}
+   184→
+   185→function hasStringField(value: unknown, field: string): value is Record<string, string> {
+   186→  return isRecord(value) && typeof value[field] === "string";
+   187→}
+   188→
+   189→const isValidMbti = (v: unknown): v is string => typeof v === "string" && /^[A-Z]{4}$/.test(v.trim());
+   190→
+   191→export interface BaseProfile {
+   192→  displayName: string;
+   193→  gender: Gender;
+   194→  age: number;
+   195→  mbti: string;
+   196→  basicInfo: string;
+   197→}
+   198→
+   199→interface BaseProfilesResponse {
+   200→  profiles: BaseProfile[];
+   201→}
+   202→
+   203→const normalizeBaseProfiles = (result: unknown): { profiles: BaseProfile[]; raw: unknown } => {
+   204→  if (isRecord(result) && Array.isArray(result.profiles)) {
+   205→    return { profiles: result.profiles as BaseProfile[], raw: result };
+   206→  }
+   207→
+   208→  if (Array.isArray(result)) {
+   209→    if (result.length > 0 && hasStringField(result[0], "displayName")) {
+   210→      return { profiles: result as BaseProfile[], raw: result };
+   211→    }
+   212→    return { profiles: [], raw: result };
+   213→  }
+   214→
+   215→  return { profiles: [], raw: result };
+   216→};
+   217→
+   218→const isValidGender = (g: unknown): g is Gender => g === "male" || g === "female" || g === "nonbinary";
+   219→
+   220→const isValidBaseProfiles = (profiles: unknown, count: number): profiles is BaseProfile[] => {
+   221→  if (!Array.isArray(profiles) || profiles.length !== count) return false;
+   222→  const ok = profiles.every((p) => {
+   223→    if (!isRecord(p)) return false;
+   224→    if (typeof p.displayName !== "string" || !p.displayName.trim()) return false;
+   225→    if (!isValidGender(p.gender)) return false;
+   226→    if (typeof p.age !== "number" || !Number.isFinite(p.age) || p.age < 16 || p.age > 70) return false;
+   227→    if (!isValidMbti(p.mbti)) return false;
+   228→    if (typeof p.basicInfo !== "string" || !p.basicInfo.trim()) return false;
+   229→    return true;
+   230→  });
+   231→
+   232→  if (!ok) return false;
+   233→  const names = profiles.map((p) => String(p.displayName).trim()).filter(Boolean);
+   234→  if (names.length !== count) return false;
+   235→  if (new Set(names).size !== count) return false;
+   236→  return true;
+   237→};
+   238→
+   239→const buildBaseProfilesPrompt = (count: number, scenario: GameScenario) => {
+   240→  const { t } = getI18n();
+   241→  return t("characterGenerator.baseProfilesPrompt", {
+   242→    count,
+   243→    title: scenario.title,
+   244→    description: scenario.description,
+   245→    rolesHint: scenario.rolesHint,
+   246→  });
+   247→};
+   248→
+   249→const buildCharacterSchemaLine = (p: BaseProfile): string => (
+   250→  `  { "displayName": "${p.displayName}", "persona": { "voiceRules": string[], "werewolfExperience": string, "vocabularyStyle": string, "reasoningStyle": string, "wolfDeceptionStyle": string, "mbti": "${p.mbti}", "gender": "${p.gender}", "age": ${p.age} }, "playerMind": { "courage": string, "suspicionThreshold": string, "selfProtection": string } }`
+   251→);
+   252→
+   253→const normalizeGeneratedCharacters = (
+   254→  result: unknown
+   255→): { characters: GeneratedCharacter[]; raw: unknown } => {
+   256→  if (result && typeof result === "object" && "displayName" in result && "persona" in result) {
+   257→    return { characters: [result as GeneratedCharacter], raw: result };
+   258→  }
+   259→
+   260→  if (isRecord(result) && Array.isArray(result.characters)) {
+   261→    return { characters: result.characters as GeneratedCharacter[], raw: result };
+   262→  }
+   263→
+   264→  if (Array.isArray(result)) {
+   265→    if (result.length > 0 && hasStringField(result[0], "displayName")) {
+   266→      return { characters: result as GeneratedCharacter[], raw: result };
+   267→    }
+   268→    return { characters: [], raw: result };
+   269→  }
+   270→
+   271→  return { characters: [], raw: result };
+   272→};
+   273→
+   274→const isValidPersona = (p: unknown): p is Persona => {
+   275→  if (!isRecord(p)) return false;
+   276→  // styleLabel is now optional
+   277→  if (p.styleLabel !== undefined && typeof p.styleLabel !== "string") return false;
+   278→  if (!Array.isArray(p.voiceRules) || p.voiceRules.filter((x): x is string => typeof x === "string" && x.trim().length > 0).length === 0) return false;
+   279→  if (!isValidMbti(p.mbti)) return false;
+   280→  if (!isValidGender(p.gender)) return false;
+   281→  if (typeof p.age !== "number" || !Number.isFinite(p.age) || p.age < 16 || p.age > 70) return false;
+   282→  if (p.relationships !== undefined) {
+   283→    if (!Array.isArray(p.relationships)) return false;
+   284→    if (p.relationships.some((x) => typeof x !== "string")) return false;
+   285→  }
+   286→  return true;
+   287→};
+   288→
+   289→const isValidPersonaForProfile = (p: unknown, profile: BaseProfile): p is Persona => {
+   290→  if (!isValidPersona(p)) return false;
+   291→  if (p.gender !== profile.gender) return false;
+   292→  if (p.age !== profile.age) return false;
+   293→  if (String(p.mbti).trim() !== profile.mbti) return false;
+   294→  return true;
+   295→};
+   296→
+   297→const PLAYER_MIND_REQUIRED_FIELDS: Array<keyof PlayerMind> = [
+   298→  "courage",
+   299→  "memoryBias",
+   300→  "suspicionThreshold",
+   301→  "selfProtection",
+   302→  "logicDepth",
+   303→  "tablePresence",
+   304→];
+   305→
+   306→const isValidPlayerMind = (mind: unknown): mind is PlayerMind => {
+   307→  if (!mind || typeof mind !== "object") return false;
+   308→  const record = mind as Record<string, unknown>;
+   309→  if (PLAYER_MIND_REQUIRED_FIELDS.some((key) => {
+   310→    const value = record[key];
+   311→    return typeof value !== "string" || !value.trim();
+   312→  })) {
+   313→    return false;
+   314→  }
+   315→  return true;
+   316→};
+   317→
+   318→const PERSONA_TEXT_FIELDS = [
+   319→  "werewolfExperience",
+   320→  "vocabularyStyle",
+   321→  "reasoningStyle",
+   322→  "speechLengthHabit",
+   323→  "pressureStyle",
+   324→  "uncertaintyStyle",
+   325→  "mistakePattern",
+   326→  "wolfDeceptionStyle",
+   327→ ] as const satisfies ReadonlyArray<
+   328→  "werewolfExperience" |
+   329→  "vocabularyStyle" |
+   330→  "reasoningStyle" |
+   331→  "speechLengthHabit" |
+   332→  "pressureStyle" |
+   333→  "uncertaintyStyle" |
+   334→  "mistakePattern" |
+   335→  "wolfDeceptionStyle"
+   336→>;
+   337→
+   338→const OPTIONAL_PERSONA_STRING_FIELDS = ["logicStyle", "socialHabit", "humorStyle"] as const satisfies ReadonlyArray<
+   339→  "logicStyle" | "socialHabit" | "humorStyle"
+   340→>;
+   341→
+   342→const PLAYER_MIND_FALLBACKS: Record<keyof PlayerMind, string> = {
+   343→  courage: "Usually avoids flashy risks, but will commit when the table direction becomes clear.",
+   344→  memoryBias: "Remembers voting patterns and obvious contradictions first, then tone and timing.",
+   345→  suspicionThreshold: "Needs more than one clue before fully changing sides, with votes and incentives carrying the most weight.",
+   346→  selfProtection: "Tends to explain their logic first, then push back if pressure keeps building.",
+   347→  logicDepth: "Can connect a few players and vote relationships, but still prefers concrete table evidence.",
+   348→  tablePresence: "Speaks in measured turns, not loud by default, and becomes firmer in key moments.",
+   349→};
+   350→
+   351→function normalizeStringArray(value: unknown): string[] {
+   352→  if (Array.isArray(value)) {
+   353→    return value
+   354→      .filter((item): item is string => typeof item === "string")
+   355→      .map((item) => item.trim())
+   356→      .filter(Boolean);
+   357→  }
+   358→  if (typeof value === "string" && value.trim()) {
+   359→    return [value.trim()];
+   360→  }
+   361→  return [];
+   362→}
+   363→
+   364→function normalizePlayerMind(mind: unknown): PlayerMind {
+   365→  const record = mind && typeof mind === "object" ? (mind as Record<string, unknown>) : {};
+   366→  return {
+   367→    courage: typeof record.courage === "string" && record.courage.trim() ? record.courage.trim() : PLAYER_MIND_FALLBACKS.courage,
+   368→    memoryBias:
+   369→      typeof record.memoryBias === "string" && record.memoryBias.trim()
+   370→        ? record.memoryBias.trim()
+   371→        : PLAYER_MIND_FALLBACKS.memoryBias,
+   372→    suspicionThreshold:
+   373→      typeof record.suspicionThreshold === "string" && record.suspicionThreshold.trim()
+   374→        ? record.suspicionThreshold.trim()
+   375→        : PLAYER_MIND_FALLBACKS.suspicionThreshold,
+   376→    selfProtection:
+   377→      typeof record.selfProtection === "string" && record.selfProtection.trim()
+   378→        ? record.selfProtection.trim()
+   379→        : PLAYER_MIND_FALLBACKS.selfProtection,
+   380→    logicDepth:
+   381→      typeof record.logicDepth === "string" && record.logicDepth.trim()
+   382→        ? record.logicDepth.trim()
+   383→        : PLAYER_MIND_FALLBACKS.logicDepth,
+   384→    tablePresence:
+   385→      typeof record.tablePresence === "string" && record.tablePresence.trim()
+   386→        ? record.tablePresence.trim()
+   387→        : PLAYER_MIND_FALLBACKS.tablePresence,
+   388→  };
+   389→}
+   390→
+   391→function normalizePersonaForProfile(persona: unknown, profile: BaseProfile): Persona {
+   392→  const record = isRecord(persona) ? persona : {};
+   393→  const voiceRules = normalizeStringArray(record.voiceRules);
+   394→  const normalized: Persona = {
+   395→    styleLabel: typeof record.styleLabel === "string" && record.styleLabel.trim() ? record.styleLabel.trim() : undefined,
+   396→    voiceRules: voiceRules.length > 0 ? voiceRules : ["speaks in a natural, table-focused way"],
+   397→    mbti: profile.mbti,
+   398→    gender: profile.gender,
+   399→    age: profile.age,
+   400→    voiceId: typeof record.voiceId === "string" && record.voiceId.trim() ? record.voiceId.trim() : undefined,
+   401→    relationships: undefined,
+   402→    basicInfo: profile.basicInfo,
+   403→  };
+   404→
+   405→  for (const field of PERSONA_TEXT_FIELDS) {
+   406→    const value = record[field];
+   407→    if (typeof value === "string" && value.trim()) {
+   408→      normalized[field] = value.trim();
+   409→    }
+   410→  }
+   411→
+   412→  for (const field of OPTIONAL_PERSONA_STRING_FIELDS) {
+   413→    const value = record[field];
+   414→    if (typeof value === "string" && value.trim()) {
+   415→      normalized[field] = value.trim();
+   416→    }
+   417→  }
+   418→
+   419→  const triggerTopics = normalizeStringArray(record.triggerTopics);
+   420→  if (triggerTopics.length > 0) {
+   421→    normalized.triggerTopics = triggerTopics;
+   422→  }
+   423→
+   424→  return normalized;
+   425→}
+   426→
+   427→function normalizeGeneratedCharacterForProfile(char: unknown, profile: BaseProfile): GeneratedCharacter | null {
+   428→  if (!char || typeof char !== "object") return null;
+   429→  const record = char as Record<string, unknown>;
+   430→  const rawName = typeof record.displayName === "string" ? record.displayName.trim() : "";
+   431→  if (!rawName) return null;
+   432→
+   433→  return {
+   434→    displayName: rawName,
+   435→    persona: normalizePersonaForProfile(record.persona, profile),
+   436→    playerMind: normalizePlayerMind(record.playerMind),
+   437→    avatarSeed: typeof record.avatarSeed === "string" && record.avatarSeed.trim() ? record.avatarSeed.trim() : undefined,
+   438→  };
+   439→}
+   440→
+   441→const alignCharactersToProfiles = (
+   442→  chars: unknown,
+   443→  profiles: BaseProfile[]
+   444→): GeneratedCharacter[] | null => {
+   445→  if (!Array.isArray(chars)) {
+   446→    console.error("[alignCharacters] chars is not an array:", chars);
+   447→    return null;
+   448→  }
+   449→  if (chars.length !== profiles.length) {
+   450→    console.error(`[alignCharacters] length mismatch: ${chars.length} chars vs ${profiles.length} profiles`);
+   451→    return null;
+   452→  }
+   453→  const byName = new Map<string, GeneratedCharacter>();
+   454→  for (const c of chars as GeneratedCharacter[]) {
+   455→    if (!c || typeof c !== "object") {
+   456→      console.error("[alignCharacters] invalid character object:", c);
+   457→      return null;
+   458→    }
+   459→    const name = typeof c.displayName === "string" ? c.displayName.trim() : "";
+   460→    if (!name) {
+   461→      console.error("[alignCharacters] missing displayName:", c);
+   462→      return null;
+   463→    }
+   464→    if (byName.has(name)) {
+   465→      console.error("[alignCharacters] duplicate name:", name);
+   466→      return null;
+   467→    }
+   468→    byName.set(name, c);
+   469→  }
+   470→  const ordered: GeneratedCharacter[] = [];
+   471→  for (const profile of profiles) {
+   472→    const key = profile.displayName.trim();
+   473→    const rawCharacter = byName.get(key);
+   474→    if (!rawCharacter) {
+   475→      console.error(`[alignCharacters] character not found for profile: ${key}, available names:`, Array.from(byName.keys()));
+   476→      return null;
+   477→    }
+   478→    const c = normalizeGeneratedCharacterForProfile(rawCharacter, profile);
+   479→    if (!c || !isValidPersonaForProfile(c.persona, profile) || !isValidPlayerMind(c.playerMind)) {
+   480→      const p = isRecord(rawCharacter) ? rawCharacter.persona : undefined;
+   481→      console.error(`[alignCharacters] invalid persona for ${key}:`, {
+   482→        rawCharacter,
+   483→        normalizedCharacter: c,
+   484→        profile: { gender: profile.gender, age: profile.age, mbti: profile.mbti },
+   485→        isValid: c ? isValidPersona(c.persona) : false,
+   486→        isValidPlayerMind: c ? isValidPlayerMind(c.playerMind) : false,
+   487→        genderMatch: p?.gender === profile.gender,
+   488→        ageMatch: p?.age === profile.age,
+   489→        mbtiMatch: isRecord(p) ? String(p.mbti || "").trim() === profile.mbti : false,
+   490→      });
+   491→      return null;
+   492→    }
+   493→    ordered.push(c);
+   494→  }
+   495→  return ordered;
+   496→};
+   497→
+   498→const buildFullPersonasPrompt = (scenario: GameScenario, allProfiles: BaseProfile[]) => {
+   499→  const { t } = getI18n();
+   500→  const roster = allProfiles
+   501→    .map((p, i) =>
+   502→      t("characterGenerator.rosterLine", {
+   503→        index: i + 1,
+   504→        name: p.displayName,
+   505→        gender: p.gender,
+   506→        age: p.age,
+   507→        basicInfo: p.basicInfo,
+   508→      })
+   509→    )
+   510→    .join("\n");
+   511→
+   512→  const schema = allProfiles.map(buildCharacterSchemaLine).join(",\n");
+   513→
+   514→  return t("characterGenerator.fullPersonasPrompt", {
+   515→    title: scenario.title,
+   516→    description: scenario.description,
+   517→    roster,
+   518→    count: allProfiles.length,
+   519→    schema,
+   520→  });
+   521→};
+   522→
+   523→/** 合并版 prompt：一次生成完整角色（base info + persona + playerMind） */
+   524→// HMR trigger
+   525→const buildMergedPrompt = (count: number, scenario: GameScenario) => {
+   526→  const isZh = getI18n().locale === "zh";
+   527→  if (isZh) {
+   528→    return `你是狼人杀游戏的角色设计师。
+   529→
+   530→【当前剧本背景】
+   531→标题：${scenario.title}
+   532→背景：${scenario.description}
+   533→角色建议：${scenario.rolesHint}
+   534→
+   535→【任务】
+   536→生成 ${count} 个玩家角色，每个角色包含基础信息和完整人设。这些是"玩狼人杀的普通人"，不是悬疑剧本的角色。
+   537→
+   538→【重要：字段值用短语(5-15字)，不要完整句子】
+   539→例如：werewolfExperience 写"信息博弈视角"而非"这个人认为狼人杀是信息博弈关键在于控制信息流"
+   540→
+   541→【persona 字段】（只生成以下 4 个）
+   542→- werewolfExperience：短语，怎么理解狼人杀
+   543→- vocabularyStyle：短语，常用词和术语密度
+   544→- reasoningStyle：短语，最先注意什么
+   545→- wolfDeceptionStyle：短语，拿狼时怎么伪装
+   546→
+   547→【playerMind 字段】（只生成以下 3 个）
+   548→- courage：短语，敢不敢诈/硬推
+   549→- suspicionThreshold：短语，几条线索改站边
+   550→- selfProtection：短语，被攻击时怎么应对
+   551→
+   552→【voiceRules】每项 2-4 字短语，1-2 个，如 ["冷静","数据流"]
+   553→
+   554→【输出格式】
+   555→输出 JSON 数组（共 ${count} 个），每个对象严格匹配以下 schema：
+   556→[{"displayName":"中文名2-3字","gender":"male或female","age":25,"mbti":"INTJ","basicInfo":"一句话职业","persona":{"voiceRules":["短语"],"werewolfExperience":"短语","vocabularyStyle":"短语","reasoningStyle":"短语","wolfDeceptionStyle":"短语"},"playerMind":{"courage":"短语","suspicionThreshold":"短语","selfProtection":"短语"}}]
+   557→
+   558→【重要】
+   559→- 名字各不相同，符合场景名字风格
+   560→- 年龄 20-55，mbti 是 4 字母
+   561→- 只输出 JSON 数组，不要 markdown 代码块、不要解释文字
+   562→- 每个字段一句话短语，不要长篇大论`;
+   563→  }
+   564→  return `You are a character designer for a Werewolf game.
+   565→
+   566→[Scene]
+   567→${scenario.title} - ${scenario.description}
+   568→Role hints: ${scenario.rolesHint}
+   569→Note: scene only flavors identity and names; gameplay stays on Werewolf itself.
+   570→
+   571→[Task]
+   572→Generate ${count} player characters, each with base info and full persona. These are "ordinary people playing Werewolf", not mystery characters.
+   573→
+   574→[IMPORTANT: field values must be SHORT PHRASES (3-10 words), NOT full sentences]
+   575→e.g. werewolfExperience: "info-game perspective" NOT "this person thinks Werewolf is about controlling information flow"
+   576→
+   577→[persona fields] (generate ONLY these 4)
+   578→- werewolfExperience: short phrase, how they view Werewolf
+   579→- vocabularyStyle: short phrase, jargon density
+   580→- reasoningStyle: short phrase, what they notice first
+   581→- wolfDeceptionStyle: short phrase, wolf disguise approach
+   582→
+   583→[playerMind fields] (generate ONLY these 3)
+   584→- courage: short phrase, bluff/push willingness
+   585→- suspicionThreshold: short phrase, clues needed to switch
+   586→- selfProtection: short phrase, defense when attacked
+   587→
+   588→[voiceRules] each 2-4 word phrase, 1-2 items, e.g. ["calm","analytical"]
+   589→
+   590→[Output format]
+   591→JSON array (${count} objects), each matching this schema:
+   592→[{"displayName":"Name","gender":"male or female","age":25,"mbti":"INTJ","basicInfo":"one-line job","persona":{"voiceRules":["phrase"],"werewolfExperience":"phrase","vocabularyStyle":"phrase","reasoningStyle":"phrase","wolfDeceptionStyle":"phrase"},"playerMind":{"courage":"phrase","suspicionThreshold":"phrase","selfProtection":"phrase"}}]
+   593→
+   594→[Important]
+   595→- Unique names, age 20-55, mbti 4 letters
+   596→- Output ONLY the JSON array, no markdown, no explanation
+   597→- One short phrase per field, keep it concise`;
+   598→};
+   599→
+   600→export async function generateCharacters(
+   601→  count: number,
+   602→  scenario?: GameScenario,
+   603→  options?: {
+   604→    onBaseProfiles?: (profiles: BaseProfile[]) => void;
+   605→    onCharacter?: (index: number, character: GeneratedCharacter) => void;
+   606→  }
+   607→): Promise<GeneratedCharacter[]> {
+   608→  const usedScenario = scenario ?? getRandomScenario();
+   609→  const runOnce = async () => {
+   610→    const startTime = Date.now();
+   611→    // 合并两阶段：一次调用生成完整角色（base info + persona + playerMind），
+   612→    // 省掉单独的 base profiles 调用（~7s），总耗时减半。
+   613→    const mergedPrompt = buildMergedPrompt(count, usedScenario);
+   614→
+   615→    // 流式生成：每解析出一个完整角色就立即回调
+   616→    const finalizedCharacters: GeneratedCharacter[] = [];
+   617→    const emittedIndices = new Set<number>();
+   618→    const emittedBaseProfiles: BaseProfile[] = [];
+   619→    let accumulatedContent = "";
+   620→
+   621→    // 精简字段后每角色约 400 tokens
+   622→    const fullMaxTokens = Math.max(3500, count * 450 + 600);
+   623→
+   624→    const stream = generateCompletionStream({
+   625→      model: getGeneratorModel(),
+   626→      messages: [{ role: "user", content: mergedPrompt }],
+   627→      temperature: GAME_TEMPERATURE.CHARACTER_GENERATION,
+   628→      max_tokens: fullMaxTokens,
+   629→      reasoning: CHARACTER_GENERATOR_REASONING,
+   630→    });
+   631→
+   632→    for await (const chunk of stream) {
+   633→      accumulatedContent += chunk;
+   634→
+   635→      // 提取完整的角色对象（含 displayName + persona + playerMind + base info）
+   636→      const cleaned = stripMarkdownCodeFences(accumulatedContent);
+   637→      const characterPattern = /\{\s*"displayName"\s*:\s*"[^"]+"\s*,\s*"gender"\s*:\s*"[^"]+"\s*,\s*"age"\s*:\s*\d+[^}]*"persona"\s*:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*,\s*"playerMind"\s*:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*\}/g;
+   638→      const matches = cleaned.match(characterPattern);
+   639→
+   640→      if (matches) {
+   641→        for (const match of matches) {
+   642→          try {
+   643→            const c = parseLLMJson<GeneratedCharacter & { gender?: string; age?: number; mbti?: string; basicInfo?: string }>(match);
+   644→            if (!c || !c.displayName) continue;
+   645→
+   646→            // 用 displayName 去重（合并模式下没有预生成的 baseProfiles 数组）
+   647→            const existingIndex = finalizedCharacters.findIndex(
+   648→              (fc) => fc?.displayName === c.displayName
+   649→            );
+   650→            if (existingIndex !== -1) continue; // 已处理
+   651→
+   652→            const index = emittedBaseProfiles.length;
+   653→            emittedBaseProfiles.push({
+   654→              displayName: c.displayName,
+   655→              gender: (c.gender === "female" ? "female" : "male") as "male" | "female",
+   656→              age: typeof c.age === "number" ? c.age : 25,
+   657→              mbti: c.mbti || "INTJ",
+   658→              basicInfo: c.basicInfo || "",
+   659→            });
+   660→
+   661→            // 名字一出就触发 baseProfiles 回调（让前端先显示名字）
+   662→            options?.onBaseProfiles?.([...emittedBaseProfiles]);
+   663→
+   664→            // 构建完整角色
+   665→            const persona = c.persona;
+   666→            if (!persona || !Array.isArray(persona.voiceRules) || persona.voiceRules.length === 0) continue;
+   667→
+   668→            const voiceId = resolveVoiceId(
+   669→              persona.voiceId,
+   670→              persona.gender,
+   671→              persona.age,
+   672→              "zh" as AppLocale
+   673→            );
+   674→
+   675→            const character: GeneratedCharacter = {
+   676→              displayName: c.displayName,
+   677→              persona: {
+   678→                ...persona,
+   679→                gender: persona.gender || (emittedBaseProfiles[index].gender as "male" | "female" | "nonbinary"),
+   680→                age: persona.age || emittedBaseProfiles[index].age,
+   681→                mbti: persona.mbti || emittedBaseProfiles[index].mbti,
+   682→                basicInfo: emittedBaseProfiles[index].basicInfo,
+   683→                voiceId,
+   684→                relationships: undefined,
+   685→              },
+   686→              playerMind: c.playerMind,
+   687→            };
+   688→
+   689→            finalizedCharacters[index] = character;
+   690→            options?.onCharacter?.(index, character);
+   691→            console.log(`[character-gen] emitted character ${index}: ${character.displayName}`);
+   692→          } catch {
+   693→            // 解析失败是正常的
+   694→          }
+   695→        }
+   696→      }
+   697→    }
+   698→
+   699→    // 流式结束后，检查是否所有角色都已生成
+   700→    if (finalizedCharacters.filter(Boolean).length < count) {
+   701→      // 回退到完整解析
+   702→      const cleaned = stripMarkdownCodeFences(accumulatedContent);
+   703→      const fullResult = parseLLMJson<unknown>(cleaned);
+   704→      if (!fullResult) {
+   705→        throw new Error("Character generation returned invalid JSON");
+   706→      }
+   707→
+   708→      const normalized = normalizeGeneratedCharacters(fullResult);
+   709→      const chars = normalized.characters;
+   710→
+   711→      // 补充未生成的角色（合并模式下无 baseProfiles，直接用生成结果）
+   712→      for (let i = 0; i < chars.length; i++) {
+   713→        if (finalizedCharacters[i]) continue;
+   714→
+   715→        const c = chars[i];
+   716→        if (!c?.persona) continue;
+   717→
+   718→        const voiceId = resolveVoiceId(
+   719→          c.persona.voiceId,
+   720→          c.persona.gender,
+   721→          c.persona.age,
+   722→          "zh" as AppLocale
+   723→        );
+   724→
+   725→        const character: GeneratedCharacter = {
+   726→          displayName: c.displayName,
+   727→          persona: {
+   728→            ...c.persona,
+   729→            voiceId,
+   730→            relationships: undefined,
+   731→          },
+   732→          playerMind: c.playerMind,
+   733→        };
+   734→
+   735→        finalizedCharacters[i] = character;
+   736→        options?.onCharacter?.(i, character);
+   737→      }
+   738→    }
+   739→
+   740→    await aiLogger.log({
+   741→      type: "character_generation",
+   742→      request: { 
+   743→        model: getGeneratorModel(),
+   744→        messages: [{ role: "user", content: mergedPrompt }],
+   745→      },
+   746→      response: { 
+   747→        content: JSON.stringify(finalizedCharacters.map((c) => ({
+   748→          displayName: c.displayName,
+   749→          hiddenCommunicationProfile: {
+   750→            werewolfExperience: c.persona.werewolfExperience,
+   751→            vocabularyStyle: c.persona.vocabularyStyle,
+   752→            reasoningStyle: c.persona.reasoningStyle,
+   753→            speechLengthHabit: c.persona.speechLengthHabit,
+   754→            pressureStyle: c.persona.pressureStyle,
+   755→            uncertaintyStyle: c.persona.uncertaintyStyle,
+   756→            mistakePattern: c.persona.mistakePattern,
+   757→            wolfDeceptionStyle: c.persona.wolfDeceptionStyle,
+   758→          },
+   759→          playerMind: c.playerMind,
+   760→        }))),
+   761→        duration: Date.now() - startTime 
+   762→      },
+   763→    });
+   764→
+   765→    return finalizedCharacters;
+   766→  };
+   767→
+   768→  let lastError: unknown;
+   769→  for (let attempt = 0; attempt < 2; attempt += 1) {
+   770→    try {
+   771→      console.log(
+   772→        `[character-gen] Attempt ${attempt + 1}/2, customKeyEnabled: ${isCustomKeyEnabled()}`
+   773→      );
+   774→      return await runOnce();
+   775→    } catch (error) {
+   776→      lastError = error;
+   777→      console.error(`[character-gen] Attempt ${attempt + 1} failed:`, error);
+   778→
+   779→      const errorMsg = String(error);
+   780→      const isQuotaError = errorMsg.includes("[QUOTA_EXHAUSTED]") ||
+   781→                          errorMsg.includes("402") ||
+   782→                          errorMsg.includes("insufficient") ||
+   783→                          errorMsg.includes("余额");
+   784→
+   785→      // Quota exhaustion is not recoverable by retrying — abort immediately
+   786→      // (applies to both built-in z.ai quota and custom-key quota).
+   787→      if (isQuotaError) {
+   788→        console.error("[character-gen] Quota exhausted, aborting retry");
+   789→        throw error;
+   790→      }
+   791→      
+   792→      if (attempt === 0) {
+   793→        continue;
+   794→      }
+   795→      console.error("Character generation failed:", error);
+   796→      await aiLogger.log({
+   797→        type: "character_generation",
+   798→        request: { 
+   799→          model: GENERATOR_MODEL,
+   800→          messages: [{ role: "user", content: "(two-stage generation)" }],
+   801→        },
+   802→        response: { content: "[]", duration: 0 },
+   803→        error: String(error),
+   804→      });
+   805→    }
+   806→  }
+   807→
+   808→  throw lastError;
+   809→}
+   810→

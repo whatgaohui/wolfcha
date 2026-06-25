@@ -1,0 +1,544 @@
+     1→---
+     2→Task ID: 1
+     3→Agent: Explore
+     4→Task: Analyze wolfcha AI/LLM/TTS integration points
+     5→
+     6→Work Log:
+     7→- Verified worklog.md did not exist; created it now (append-style entry for Task 1).
+     8→- Listed the project tree to map out API routes, lib files, hooks, phases, and components.
+     9→- Read `/home/z/my-project/src/app/api/chat/route.ts` (979 lines) in 3 chunks to fully understand the LLM proxy flow.
+    10→- Read `/home/z/my-project/src/lib/llm.ts` (869 lines) in 2 chunks; identified all exported helpers.
+    11→- Read `/home/z/my-project/src/lib/ai-config.ts` (47 lines) and `/home/z/my-project/src/lib/api-keys.ts` (346 lines) in full.
+    12→- Read `/home/z/my-project/src/types/game.ts` (373 lines) — captured ModelRef, MODEL_IDS, AVAILABLE_MODELS, PROJECT_MODELS, ALL_MODELS, BUILTIN_PLAYER_MODELS, PLAYER_MODELS, DEFAULT_MODEL_CONFIG, GENERATOR_MODEL, SUMMARY_MODEL, REVIEW_MODEL.
+    13→- Read `/home/z/my-project/src/app/api/tts/route.ts` (400 lines) and `/home/z/my-project/src/app/api/stt/route.ts` (11 lines) in full.
+    14→- Read `/home/z/my-project/src/lib/narrator-voice.ts`, `narrator-audio-player.ts`, `voice-constants.ts`, `audio-manager.ts` in full.
+    15→- Inspected `character-generator.ts` (focused on lines 1–100 and 530–630) and used grep to map all LLM call sites in `game-master.ts` (2241 lines) and `game-analysis.ts` (1814 lines).
+    16→- Listed `/home/z/my-project/src/game/phases/` and confirmed the 6 phase files only build prompts and call game-master.ts functions (no direct LLM calls).
+    17→- Read `/home/z/my-project/src/app/page.tsx` (lines 1–150 and 1250–1370 plus tail) and `WelcomeScreen.tsx` (lines 1–300, 600–760, 1100–1190) and `GameSetupModal.tsx` (lines 1–100) in full.
+    18→- Read `/home/z/my-project/src/app/ai-models/page.tsx` (lines 1–100) — confirmed it is a static SEO/marketing page, not a model selector.
+    19→- Grepped for callers of `/api/chat`, `/api/tts`, `/api/stt`, `/api/validate-key`; inspected `vote-batch/route.ts`, `DevConsole.tsx`, `VoiceRecorder.tsx`.
+    20→- Located the real model-selection UI inside `UserProfileModal.tsx` (lines 700–820 for key inputs, 920–1020 for model dropdowns).
+    21→- Cross-referenced `.env.example` and `.env.local` to enumerate the env vars that drive every provider.
+    22→
+    23→Stage Summary:
+    24→
+    25→# Wolfcha — AI / LLM / TTS / STT Integration Map (for z.ai SDK replacement)
+    26→
+    27→## 1. LLM Integration
+    28→
+    29→### 1a. Server-side LLM proxy — `src/app/api/chat/route.ts` (979 lines)
+    30→
+    31→This is the single gateway every LLM call goes through. It is a Next.js `POST` route handler that proxies OpenAI-compatible `/chat/completions` requests to **3 providers** based on the model id (looked up via `ALL_MODELS` / `PROJECT_MODELS`).
+    32→
+    33→**Providers and endpoints:**
+    34→| Provider | Type | Base URL |
+    35→|---|---|---|
+    36→| `zenmux` | OpenAI-compatible chat | `https://zenmux.ai/api/v1/chat/completions` |
+    37→| `dashscope` | Aliyun Bailian OpenAI-compatible mode | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` |
+    38→| `tokendance` | OpenAI-compatible gateway | `${TOKENDANCE_BASE_URL}/chat/completions` (default `https://tokendance.agent-universe.cn/gateway/v1`) |
+    39→
+    40→> Note: NewAPI is not present despite the task description mentioning it. Only ZenMux/DashScope/TokenDance are wired up.
+    41→
+    42→**Routing logic** (`getProviderForModel(model)`):
+    43→- Looks up the model id in `ALL_MODELS` first, then `PROJECT_MODELS`, and uses the `provider` field. If neither matches, returns `null` and the request is rejected with 400.
+    44→- The client can also force a provider via `body.provider` ("zenmux" | "dashscope" | "tokendance").
+    45→
+    46→**Auth model — dual mode (server key vs. user-supplied key):**
+    47→- If the request includes any of the headers `x-zenmux-api-key`, `x-dashscope-api-key`, `x-tokendance-api-key`, it's treated as "custom-key mode" and that header value overrides `process.env.*`.
+    48→- `hasAnyCustomKeyHeader` gates fallback: if any custom key header is present but the required one for the chosen provider is missing, request is rejected with 401 (no silent fallback to server key).
+    49→- Built-in (no custom key) requires `requireCredits(auth.user.id)` or `hasRecentUnfinishedGameSession`.
+    50→
+    51→**Request body shape (`ChatRequestPayload`, lines 280–290):**
+    52→```ts
+    53→{
+    54→  model: string;
+    55→  messages: unknown[];          // OpenAI-style {role, content} array; content may be string or multipart array
+    56→  temperature?: number;          // default 0.7; capped to 0..1 for ZenMux/Moonshot/Kimi
+    57→  max_tokens?: number;           // min 16
+    58→  stream?: boolean;
+    59→  reasoning?: { enabled: boolean; effort?: "minimal"|"low"|"medium"|"high"; max_tokens?: number };
+    60→  reasoning_effort?: "minimal"|"low"|"medium"|"high";
+    61→  response_format?: unknown;     // { type: "json_object" } | { type: "json_schema", json_schema: {...} }
+    62→  provider?: "zenmux" | "dashscope" | "tokendance";
+    63→}
+    64→```
+    65→
+    66→**Batch mode:** If the body has `{ requests: [...] }`, the route runs `runBatchItem()` for each item via `Promise.all` and returns `{ results: [...] }`. Batch mode **does not support streaming** (returns 400 if `stream=true`).
+    67→
+    68→**Streaming format:** SSE — `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`. The route just forwards `response.body` raw from the upstream provider (it does NOT re-frame the chunks). Terminator is `data: [DONE]`. Each line is `data: {json}` where `json.choices[0].delta.content` carries the text delta.
+    69→
+    70→**Per-provider transformations the route performs (important for z.ai migration):**
+    71→- `flattenMultipartContent` — for models that don't support multipart content (only `z-ai/glm`, `volcengine/doubao` per `supportsMultipartContent`), arrays are joined into a single string.
+    72→- `coalesceTextOnlyMultipartContent` + `prependDeepSeekStablePrefix` — DeepSeek-specific prefix-caching optimization. Inserts a `WOLFCHA_DEEPSEEK_CACHE_PREFIX_V1` marker system message to improve DeepSeek's automatic prefix cache hits.
+    73→- `stripCacheControl` — removes `cache_control` field from content parts for models that don't support explicit caching (everything except `anthropic/*` and `qwen/*`).
+    74→- `withDashscopeJsonHint` — DashScope: if response_format is json_object but messages don't mention "json", prepend `{role:"system", content:"Respond in json."}`.
+    75→- `normalizeDashscopeModelName` — strips `qwen/` prefix for DashScope (since DashScope uses raw `qwen-*` names).
+    76→- `toZenMuxReasoning` — ZenMux accepts `{enabled, effort, max_tokens}` only (no `exclude`).
+    77→- `toTokendanceThinking` — TokenDance uses `{type:"enabled"|"disabled", budget_tokens:number}`. GLM/Kimi models default to thinking ON, so the route forces `{type:"disabled"}` unless explicitly enabled.
+    78→
+    79→**Provider-specific request bodies:**
+    80→- **ZenMux** (lines 905–947): `{model, messages, temperature, max_tokens?, stream?, reasoning: {enabled:false}|..., response_format? (only if model supports it)}`. Headers: `Authorization: Bearer <key>`, `Content-Type: application/json`.
+    81→- **DashScope** (lines 721–752): `{model (normalized), messages, temperature, max_tokens?, stream?, response_format?}`. Headers: `Authorization: Bearer <key>`, `Content-Type: application/json`. No `reasoning` field.
+    82→- **TokenDance** (lines 813–855): `{model, messages, temperature, max_tokens?, stream?, thinking?, response_format? (only if model supports it)}`. Headers: `Authorization: Bearer <key>`, `Content-Type: application/json`, `X-App-Name: Wolfcha`, `X-Site-URL: https://wolf-cha.com`.
+    83→
+    84→**Other details:**
+    85→- Global undici dispatcher configured at module load with 60s connect timeout (default 10s) to handle slow Chinese API gateways.
+    86→- `API_TIMEOUT_MS = 60000` enforced via `AbortController` per upstream call.
+    87→- `supportsResponseFormat(model)` — only `openai/`, `google/`, `anthropic/`, `deepseek/`, `qwen/`, `moonshotai/` prefixes. z-ai/glm and others are skipped.
+    88→
+    89→---
+    90→
+    91→### 1b. Frontend LLM helper — `src/lib/llm.ts` (869 lines)
+    92→
+    93→The single client-side entry point. Everything else in the app talks to LLMs through these exports.
+    94→
+    95→**Types:**
+    96→```ts
+    97→type Provider = "zenmux" | "dashscope" | "tokendance";
+    98→
+    99→type LLMContentPart =
+   100→  | { type: "text"; text: string; cache_control?: { type: "ephemeral"; ttl?: "1h" } }
+   101→  | { type: "image_url"; image_url: { url: string; detail?: string } }
+   102→  | { type: "input_audio"; input_audio: { data: string; format: "mp3" | "wav" } };
+   103→
+   104→interface LLMMessage {
+   105→  role: "system" | "user" | "assistant";
+   106→  content: string | LLMContentPart[];
+   107→  reasoning_details?: unknown;
+   108→}
+   109→
+   110→interface GenerateOptions {
+   111→  model: string;
+   112→  provider?: Provider;
+   113→  messages: LLMMessage[];
+   114→  temperature?: number;
+   115→  max_tokens?: number;
+   116→  reasoning?: ReasoningOptions;
+   117→  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+   118→  response_format?: ResponseFormat;
+   119→}
+   120→
+   121→interface ChatCompletionResponse {  // OpenAI-shaped
+   122→  id: string;
+   123→  choices: { message: { role: "assistant"; content: string; reasoning_details?: unknown }; finish_reason: string }[];
+   124→  usage?: { prompt_tokens; completion_tokens; total_tokens; prompt_cache_hit_tokens?; prompt_cache_miss_tokens?; prompt_tokens_details?: { cached_tokens? } | null };
+   125→}
+   126→```
+   127→
+   128→**Exported functions:**
+   129→1. `generateCompletion(options): Promise<{ content, reasoning_details?, raw }>` — non-streaming. POSTs to `/api/chat`, returns the first choice's content with `<think>` blocks stripped via `stripReasoningArtifacts`.
+   130→2. `generateCompletionBatch(requests): Promise<BatchCompletionResult[]>` — POSTs `{requests: [...]}` to `/api/chat`, returns one result per item.
+   131→3. `async function* generateCompletionStream(options): AsyncGenerator<string>` — POSTs with `stream:true`, parses SSE `data: ` lines, yields each `choices[0].delta.content` string. Has a state machine for stripping `<think>...</think>` blocks mid-stream. Skips `data: [DONE]`.
+   132→4. `generateJSON<T>(options & { schema?: string }): Promise<T>` — wraps `generateCompletion`, appends "Respond with valid JSON only..." suffix to the last user message, forces `response_format: {type:"json_object"}` for ZenMux models if not set, parses with `parseJsonTolerant` (handles markdown fences, smart quotes, trailing commas, dangling quotes). On parse failure, retries once with a corrective user turn.
+   133→5. `mergeOptionsFromModelRef(modelRef, options)` — applies `temperature` / `reasoning` / `provider` overrides from a `ModelRef`.
+   134→6. `resolveApiKeySource(model): "user" | "project"` — checks `isCustomKeyEnabled()` and per-provider key presence.
+   135→7. `stripReasoningArtifacts(text)` and `stripMarkdownCodeFences(text)` — public utilities.
+   136→8. `isQuotaExhaustedMessage(message)` — checks for the `[QUOTA_EXHAUSTED]` marker.
+   137→9. `extractPromptCacheUsage(usage)` — normalizes prompt-cache stats from various provider formats.
+   138→
+   139→**Key behavior:** When `isCustomKeyEnabled()` is `false`, `resolveModelForBuiltin(model)` rewrites any non-`PROJECT_MODELS` model to the first `AVAILABLE_MODELS` entry (currently `tokendance/deepseek-v4-pro`). This means: if the user's saved model isn't in the built-in project pool, it silently falls back to `deepseek-v4-pro`.
+   140→
+   141→**Retry policy:** `fetchWithRetry(input, init, maxAttempts=4)` with retryable statuses `{429, 500, 502, 503, 504}`, exponential backoff with jitter, honors `Retry-After` header (capped at 15s).
+   142→
+   143→**Custom-key headers built by `buildCustomKeyHeaders` (only when `isCustomKeyEnabled()` returns true):**
+   144→```
+   145→X-Zenmux-Api-Key, X-Dashscope-Api-Key, X-Tokendance-Api-Key, X-Tokendance-Base-Url
+   146→```
+   147→
+   148→---
+   149→
+   150→### 1c. `src/lib/ai-config.ts` (47 lines)
+   151→
+   152→Only contains temperature presets — no provider logic:
+   153→```ts
+   154→AI_TEMPERATURE = { STRICT: 0.1, LOGIC: 0.4, BALANCED: 0.7, CREATIVE: 1.1, WILD: 1.2 }
+   155→GAME_TEMPERATURE = { CHARACTER_GENERATION: 1.2, SUMMARY: 0.1, SPEECH: 1.1, ACTION: 0.4, BADGE_SIGNUP: 0.7 }
+   156→```
+   157→
+   158→---
+   159→
+   160→### 1d. `src/lib/api-keys.ts` (346 lines) — client-side key resolution
+   161→
+   162→All keys are stored in `localStorage`. Key names:
+   163→| Storage key | Field |
+   164→|---|---|
+   165→| `wolfcha_zenmux_api_key` | ZenMux API key |
+   166→| `wolfcha_dashscope_api_key` | DashScope API key |
+   167→| `wolfcha_tokendance_api_key` | TokenDance API key |
+   168→| `wolfcha_minimax_api_key` | MiniMax API key (for TTS) |
+   169→| `wolfcha_minimax_group_id` | MiniMax Group ID |
+   170→| `wolfcha_custom_key_enabled` | "true"|"false" master toggle |
+   171→| `wolfcha_selected_models` | JSON array of model ids chosen as AI-player candidates |
+   172→| `wolfcha_generator_model`, `wolfcha_summary_model`, `wolfcha_review_model` | per-role model overrides |
+   173→| `wolfcha_validated_zenmux_key`, `wolfcha_validated_dashscope_key`, `wolfcha_validated_tokendance_key` | keys that passed `/api/validate-key` |
+   174→
+   175→**Exports:** `getZenmuxApiKey`, `getDashscopeApiKey`, `getTokendanceApiKey`, `getTokendanceBaseUrl`, `getMinimaxApiKey`, `getMinimaxGroupId`, `hasZenmuxKey/DashscopeKey/TokendanceKey/MinimaxKey`, `isCustomKeyEnabled`, `setCustomKeyEnabled`, `getSelectedModels`, `setSelectedModels`, `getGeneratorModel`, `getSummaryModel`, `getReviewModel` (each returns the project default when custom key is disabled), `clearApiKeys`, `validateApiKeyBalance()`.
+   176→
+   177→**Hardcoded constant:** `TOKENDANCE_BASE_URL = "https://tokendance.agent-universe.cn/gateway/v1"` (exported, also consumed by `/api/chat/route.ts` and `/api/validate-key/route.ts`).
+   178→
+   179→`isCustomKeyEnabled()` requires the toggle flag AND at least one LLM key. When the user disables the toggle, all model-selection storage keys are cleared.
+   180→
+   181→---
+   182→
+   183→### 1e. Model catalog — `src/types/game.ts` (lines 68–373)
+   184→
+   185→```ts
+   186→interface ModelRef {
+   187→  provider: "zenmux" | "dashscope" | "tokendance";
+   188→  model: string;
+   189→  temperature?: number;          // override call-time temperature
+   190→  reasoning?: { enabled: boolean; exclude?: boolean; effort?: "minimal"|"low"|"medium"|"high"; max_tokens?: number };
+   191→}
+   192→```
+   193→
+   194→**`MODEL_IDS`** (lines 262–288) — canonical model id strings per provider:
+   195→- `zenmux.geminiFlashLite` = `"google/gemini-3.1-flash-lite-preview"`
+   196→- `zenmux.geminiFlashPreview` = `"google/gemini-3-flash-preview"`
+   197→- `zenmux.deepseek` = `"deepseek/deepseek-v3.2"`
+   198→- `zenmux.gpt52Chat` = `"openai/gpt-5.2-chat"`
+   199→- `zenmux.claudeHaiku45` = `"anthropic/claude-haiku-4.5"`
+   200→- `zenmux.claudeSonnet45` = `"anthropic/claude-sonnet-4.5"`
+   201→- `zenmux.claudeOpus45` = `"anthropic/claude-opus-4.5"`
+   202→- `zenmux.deepseekV4Flash` = `"deepseek/deepseek-v4-flash"`
+   203→- `zenmux.grok4` = `"x-ai/grok-4"`
+   204→- `zenmux.glm47` = `"z-ai/glm-4.7"`
+   205→- `zenmux.minimaxM21` = `"minimax/minimax-m2.1"`
+   206→- `dashscope.deepseek` = `"deepseek-v3.2"`
+   207→- `tokendance.minimaxM27` = `"minimax-m2.7"`
+   208→- `tokendance.deepseekV4Pro` = `"deepseek-v4-pro"`
+   209→- `tokendance.deepseekV4Flash` = `"deepseek-v4-flash"`
+   210→- `tokendance.qwen3Max` = `"qwen3-max"`
+   211→- `tokendance.glm5` = `"glm-5"`
+   212→- `tokendance.kimiK25` = `"kimi-k2.5"`
+   213→- `tokendance.deepseekV32` = `"deepseek-v3.2"`
+   214→
+   215→**`DEFAULT_MODEL_CONFIG`** (lines 296–305):
+   216→- `generator` = `zenmux.geminiFlashLite` (Gemini 3.1 Flash Lite Preview, via ZenMux)
+   217→- `summary` = `tokendance.deepseekV4Pro` (DeepSeek V4 Pro, via TokenDance)
+   218→- `review` = `tokendance.deepseekV4Pro`
+   219→- `validation.zenmux` = `zenmux.geminiFlashLite`
+   220→- `validation.dashscope` = `dashscope.deepseek`
+   221→- `validation.tokendance` = `tokendance.minimaxM27`
+   222→
+   223→**`AVAILABLE_MODELS`** (lines 321–323): built-in pool when custom key is OFF — only ONE model: `{provider:"tokendance", model:"deepseek-v4-pro", reasoning:{enabled:false}}`.
+   224→
+   225→**`PROJECT_MODELS`** (lines 327–332): `AVAILABLE_MODELS` + DashScope validation model + ZenMux validation model. These are the models the server is allowed to call with the project key.
+   226→
+   227→**`BUILTIN_PLAYER_MODELS`** = `PLAYER_MODELS` = `[deepseek-v4-pro (tokendance)]`. Used by `character-generator.ts` `sampleModelRefs()` when custom key is OFF.
+   228→
+   229→**`ALL_MODELS`** (lines 335–355) — 18 models, the user-selectable pool when custom key is ON. Mix of zenmux (12 entries) and tokendance (7 entries) plus 1 dashscope entry. Several have `temperature: 1` and `reasoning: { enabled: false }` overrides (GLM, MiniMax, Kimi).
+   230→
+   231→**`NON_PLAYER_MODELS = []`** (line 360) — empty, so `filterPlayerModels()` is a no-op currently.
+   232→
+   233→---
+   234→
+   235→### 1f. Other files that call `/api/chat` or use `llm.ts`
+   236→
+   237→- `src/lib/character-generator.ts` — calls `generateJSON` (base profiles) and `generateCompletionStream` (full personas). Uses `getGeneratorModel()` (default = `gemini-3.1-flash-lite-preview`).
+   238→- `src/lib/game-master.ts` — central in-game AI brain. 14 LLM-calling functions:
+   239→  - `generateDailySummary` (line 646) — uses `summaryModel` (defaults to `getSummaryModel()` = deepseek-v4-pro)
+   240→  - `generateAISpeechStream` (line 733), `generateAISpeech` (793), `generateAISpeechSegments` (804), `generateAISpeechSegmentsStream` (995) — uses `player.agentProfile.modelRef` with `GAME_TEMPERATURE.SPEECH`
+   241→  - `generateAIVote` (1190) — uses player's modelRef
+   242→  - `generateAIBadgeSignupBatch` (1402), `generateAIBadgeVote` (1600), `generateBadgeTransfer` (1666)
+   243→  - Night actions: `generateSeerAction` (1764), `generateWolfAction` (1830), `generateWitchAction` (1900), `generateGuardAction` (2000)
+   244→  - `generateHunterShoot` (2069), `generateWhiteWolfKingBoomDecision` (2153)
+   245→  - All non-speech actions use `GAME_TEMPERATURE.ACTION` (0.4) and `response_format: {type:"json_object"}`.
+   246→- `src/lib/game-analysis.ts` — calls `generateJSON` twice (post-game analysis). Uses `model || getSummaryModel()` (line 1404). Called from `src/hooks/useGameAnalysis.ts` with `getReviewModel()`.
+   247→- `src/hooks/useGameLogic.ts` — only imports `isQuotaExhaustedMessage` from `llm.ts`; orchestrates `generateCharacters` (from character-generator) and `generateDailySummary` (from game-master).
+   248→- `src/app/api/vote-batch/route.ts` — server-side wrapper that POSTs to `${origin}/api/chat` with `{requests: [...]}` (batch mode), then enriches each result with `voterId`. Forwards the custom-key headers from the incoming request. This is used for parallel AI voting.
+   249→- `src/app/api/validate-key/route.ts` — validates user-supplied API keys by hitting each provider's chat endpoint with the corresponding validation model (`ZENMUX_VALIDATION_MODEL` / `DASHSCOPE_VALIDATION_MODEL` / `TOKENDANCE_VALIDATION_MODEL`). Same upstream URLs as `/api/chat`.
+   250→
+   251→---
+   252→
+   253→## 2. TTS Integration
+   254→
+   255→### 2a. Server route — `src/app/api/tts/route.ts` (400 lines)
+   256→
+   257→Next.js `POST` handler, `runtime = "nodejs"`, `dynamic = "force-dynamic"`.
+   258→
+   259→**Provider:** MiniMax T2A V2 only.
+   260→
+   261→**Request body:** `{ text: string, voiceId: string }` (JSON).
+   262→
+   263→**Response:** binary audio bytes with a sniffed `Content-Type` (`audio/mpeg`, `audio/wav`, or `audio/ogg`). On error returns JSON `{error, ...}`. Adds `X-Minimax-Voice-Id-Requested` and `X-Minimax-Voice-Id-Used` headers (the latter may differ if a fallback voice was used).
+   264→
+   265→**Auth:**
+   266→- Headers `x-minimax-api-key`, `x-minimax-group-id` (custom-key mode) override env vars.
+   267→- Env vars: `MINIMAX_API_KEY`, `MINIMAX_GROUP_ID`, `MINIMAX_API_BASE_URL` (default `https://api.minimax.chat`), `MINIMAX_TTS_MODEL` (default `speech-01-turbo`).
+   268→- If no custom key header: requires `requireCredits(auth.user.id)`.
+   269→
+   270→**Upstream request payload (lines 61–77):**
+   271→```json
+   272→{
+   273→  "model": "speech-01-turbo",
+   274→  "text": "...",
+   275→  "stream": false,
+   276→  "voice_setting": { "voice_id": "...", "speed": 1.0, "vol": 1.0, "pitch": 0 },
+   277→  "audio_setting": { "sample_rate": 32000, "bitrate": 128000, "format": "mp3", "channel": 1 }
+   278→}
+   279→```
+   280→
+   281→**URL:** `${baseUrl}/v1/t2a_v2?GroupId=${groupId}`. Falls back between `api.minimax.chat` and `api.minimaxi.com` automatically if the primary fails. Uses raw `node:https` (not `fetch`) so it can handle gzip/br/deflate decompression manually.
+   282→
+   283→**Audio extraction logic (lines 268–378):** MiniMax may return:
+   284→1. Direct binary audio (forwarded as-is).
+   285→2. JSON with `data` field containing base64 or hex encoded audio (decoded).
+   286→3. JSON with `audio.url` or `data.url` (HTTP-fetched separately).
+   287→4. JSON with `base_resp.status_code != 0` → error. Code `2054` triggers a voice-id fallback to `DEFAULT_VOICE_ID` (male/female by gender hint) and one retry.
+   288→
+   289→### 2b. `src/lib/narrator-voice.ts` (128 lines) — narrator text catalog
+   290→
+   291→Defines `NARRATOR_TEXTS` (Chinese) and `NARRATOR_TEXTS_EN` (English) — fixed game-phase strings like `"天黑请闭眼"`, `"1号玩家出局"`, `"好人获胜"`, etc. Also defines `NARRATOR_VOICE_ID = "Chinese (Mandarin)_Mature_Woman"` and `NARRATOR_VOICE_ID_EN = "Serene_Woman"`.
+   292→
+   293→> **Important:** `getNarratorAudioPath(key, locale)` returns `/audio/narrator/${locale}/${key}.mp3`. These MP3 files are **pre-baked static assets** in `/public/audio/narrator/{zh,en}/*.mp3` — they are NOT generated on-the-fly by MiniMax TTS. Generated by `scripts/generate-narrator-audio.ts` (one-time offline script).
+   294→
+   295→### 2c. `src/lib/narrator-audio-player.ts` (150 lines) — singleton HTML5 Audio player
+   296→
+   297→Plays the pre-baked narrator MP3 files. Does **NOT** call `/api/tts`. Has `play(key, locale?)`, `playAsync(key)`, `stop()`, `setEnabled(bool)`, `setVolume(0..1)`. Singleton via `getNarratorPlayer()`.
+   298→
+   299→### 2d. `src/lib/voice-constants.ts` (106 lines) — MiniMax voice catalog
+   300→
+   301→- `VOICE_PRESETS` (15 Chinese voices) and `ENGLISH_VOICE_PRESETS` (12 English voices), each with `id`, `name`, `styles`, `gender`, `minAge`, `maxAge`.
+   302→- `DEFAULT_VOICE_ID = { male: "male-qn-jingying", female: "Chinese (Mandarin)_Warm_Girl" }`.
+   303→- `DEFAULT_VOICE_ID_EN = { male: "English_Trustworthy_Man", female: "English_Graceful_Lady" }`.
+   304→- `resolveVoiceId(input, gender, age, locale)` — picks a voice id by gender/age match against the presets; for `zh` it preserves a valid input id, for `en` it always re-resolves from English presets.
+   305→
+   306→### 2e. `src/lib/audio-manager.ts` (295 lines) — AI-player voice queue
+   307→
+   308→Singleton `audioManager`. Used to play AI-player speech (NOT narrator lines).
+   309→
+   310→- Builds TTS headers via `buildTtsHeaders()` — adds `X-Minimax-Api-Key` / `X-Minimax-Group-Id` when custom key is enabled, plus `getAuthHeaders()` for user auth.
+   311→- `fetchAndCache(task)` — POSTs `{text, voiceId}` to `/api/tts`, stores the response `Blob` in an in-memory `Map<taskId, {blob, durationMs?}>` keyed by `${voiceId}::${text}`.
+   312→- `addToQueue(task)`, `ensureReady(task)`, `prefetchTasks(tasks, {concurrency})`, `stopCurrent()`, `clearQueue()`, `clearCache()`.
+   313→- Auto-resumes playback on user gesture if blocked by browser autoplay policy.
+   314→
+   315→### 2f. Other TTS callers
+   316→
+   317→- `src/components/DevTools/DevConsole.tsx` (line 162) — dev-only tester that POSTs `{text, voiceId}` to `/api/tts` and inspects the response.
+   318→- `src/components/game/DialogArea.tsx` (comment at line 423) — references `/api/tts` for prefetch coordination but the actual fetch is in `audio-manager.ts`.
+   319→
+   320→---
+   321→
+   322→## 3. STT Integration
+   323→
+   324→### 3a. `src/app/api/stt/route.ts` (11 lines)
+   325→
+   326→**Currently a disabled stub.** Always returns:
+   327→```ts
+   328→return NextResponse.json({ error: "语音识别暂时不可用" }, { status: 410 });
+   329→```
+   330→No provider is wired up. `runtime = "nodejs"`, `dynamic = "force-dynamic"`.
+   331→
+   332→### 3b. Frontend caller — `src/components/game/VoiceRecorder.tsx` (line 293)
+   333→
+   334→Still calls the disabled endpoint with:
+   335→```ts
+   336→fetch("/api/stt", {
+   337→  method: "POST",
+   338→  headers: { "Content-Type": "application/json" },
+   339→  body: JSON.stringify({ audio: b64, format: "wav" }),
+   340→});
+   341→```
+   342→Expects `{ text: string }` in the response. Currently always fails (410).
+   343→
+   344→---
+   345→
+   346→## 4. Character Generation & Game Phases
+   347→
+   348→### 4a. `src/lib/character-generator.ts` (752 lines)
+   349→
+   350→Two-phase generation pipeline:
+   351→1. **Base profiles** (line 544) — `generateJSON({model: getGeneratorModel(), messages, temperature: 1.2 (WILD), max_tokens: ~350*N + 600, reasoning: {enabled:false}})` returns an array of `{displayName, basicInfo}`. Generator model default = `google/gemini-3.1-flash-lite-preview` (ZenMux).
+   352→2. **Full personas** (line 571) — `generateCompletionStream({...same model, max_tokens: ~1250*N + 1800})` streams JSON, parsed incrementally via regex to emit each character as soon as its closing `}` arrives. Each character gets a `voiceId` from `resolveVoiceId(persona.voiceId, persona.gender, persona.age, "zh")`.
+   353→
+   354→`sampleModelRefs(count)` (line 71) picks the AI-player model pool: when custom key is OFF, uses `PLAYER_MODELS` (= `[deepseek-v4-pro]`); when ON, filters `ALL_MODELS` by allowed providers and user's `getSelectedModels()`.
+   355→
+   356→### 4b. `src/lib/game-master.ts` (2241 lines) — central LLM brain
+   357→
+   358→All in-game LLM logic lives here. **Phase files do NOT call LLMs directly** — they only build prompts via `src/lib/prompt-utils.ts` and call game-master.ts functions (e.g. `NightPhase.ts` imports `generateGuardAction`, `generateSeerAction`, `generateWitchAction`, `generateWolfAction`; `VotePhase.ts` imports `generateAIVote`; `DaySpeechPhase.ts` calls `runAISpeech` which delegates to `generateAISpeechStream`).
+   359→
+   360→LLM call sites (15 total) — see list in section 1f. Each one builds a system+user prompt from i18n templates (`gameMaster.*` keys in `src/i18n/messages/{en,zh}.json`), wraps with `mergeOptionsFromModelRef(player.agentProfile.modelRef, ...)`, and logs to `aiLogger.log({type, request, response, duration})`.
+   361→
+   362→The private helper `generateCompletionWithParseRetry<T>` (line 1361) wraps `generateCompletion` with a one-shot retry on parse failure using `jsonRetryInstruction(...)`.
+   363→
+   364→### 4c. Phase files in `src/game/phases/` (6 files)
+   365→
+   366→| File | Lines | LLM calls | Purpose |
+   367→|---|---|---|---|
+   368→| `NightPhase.ts` | 708 | indirect (via game-master) | Guard/Wolf/Witch/Seer actions; plays narrator audio for wake/close |
+   369→| `DaySpeechPhase.ts` | 676 | indirect | Day discussion speeches, badge transfer, hunter death, vote start |
+   370→| `VotePhase.ts` | 408 | indirect | AI vote generation |
+   371→| `BadgePhase.ts` | 158 | none (only builds prompts) | Badge signup / election / transfer prompts |
+   372→| `HunterPhase.ts` | 132 | indirect | Hunter shoot decision |
+   373→| `WhiteWolfKingBoomPhase.ts` | 62 | indirect | White Wolf King boom decision |
+   374→
+   375→All import `GamePhase` from `src/game/core/GamePhase.ts` and use `src/lib/prompt-utils.ts` helpers (`buildGameContext`, `buildPersonaSection`, `buildTodayTranscript`, `getRoleText`, `getWinCondition`, `buildSystemTextFromParts`, `buildFocusAngle`, `getDayStartIndex`).
+   376→
+   377→---
+   378→
+   379→## 5. Main Page & Start Screen
+   380→
+   381→### 5a. `src/app/page.tsx` (1757 lines)
+   382→
+   383→The root route. Single React component `Home()` that toggles between two stages based on `gameStarted` (from `useGameLogic`):
+   384→- `isWelcomeStage = !gameStarted` (line 1253) → renders `<WelcomeScreen>` inside an animated motion.div (lines 1294–1325). The `onStart` handler (line 1306) calls `startGame({ ...options, isGenshinMode, isSpectatorMode })` after disabling AI voice.
+   385→- Otherwise renders the game table with player cards, dialog area, ritual cues, notebook, settings modal, dev tools, etc. (lines 1326–1753).
+   386→
+   387→Key UI props passed to `WelcomeScreen`: `humanName`, `setHumanName`, `onStart`, `onAbort=restartGame`, `isLoading`, genshin/spectator toggles, audio settings. **No model selection is passed here.**
+   388→
+   389→The page also wires `audioManager` (for AI voice) and `getNarratorPlayer()` (for narrator audio), and references `resolveVoiceId` + `AppLocale`.
+   390→
+   391→### 5b. `src/components/game/WelcomeScreen.tsx` (1579 lines)
+   392→
+   393→The landing page users see on first visit. Contains:
+   394→- Top-right toolbar: GitHub link, sponsor button, group/Discord button, locale switcher, user account button, **Settings (gear) button** → opens `GameSetupModal`.
+   395→- Hero section: name input, big "Start Game" seal button. `handleConfirm` (line 602) checks auth, credits, custom-key presence, spring-campaign quota, then calls `onStart({...})` after a particle animation.
+   396→- Sponsor cards row (ZenMux, MiniMax, OpenCreator, TokenDance, Bailian, Watcha).
+   397→- Modal children: `GameSetupModal`, `AuthModal`, `SharePanel`, `AccountModal`, `ResetPasswordModal`, `UserProfileModal`, `LowCreditModal`, `LocaleSwitcher`, `CustomCharacterModal`.
+   398→
+   399→**Model selection does NOT live here** — it's hidden behind the user account button → `UserProfileModal` → "Custom" tab.
+   400→
+   401→### 5c. `src/components/game/GameSetupModal.tsx` (223 lines)
+   402→
+   403→Small settings modal opened from WelcomeScreen's gear button. Contains:
+   404→- Player count selector (8/9/10/11/12)
+   405→- Preferred role dropdown
+   406→- Genshin mode / Spectator mode toggles
+   407→- Sound settings section (BGM volume, sound enable, AI voice enable, auto-advance dialogue)
+   408→
+   409→**No model selection, no API key inputs.**
+   410→
+   411→---
+   412→
+   413→## 6. Model Selection UI
+   414→
+   415→The real model-selection UI is in `src/components/game/UserProfileModal.tsx` (1097 lines), under the **"Custom" tab** (`<TabsContent value="custom">` at line 772). Structure:
+   416→
+   417→1. **Custom-key toggle** (line 781) — `Switch` bound to `setCustomKeyEnabled(value)`.
+   418→2. **LLM API key inputs** (lines 794–933) — revealed only when custom key is enabled:
+   419→   - TokenDance key + base URL
+   420→   - ZenMux key
+   421→   - DashScope key
+   422→   Each has a "validate" button that calls `/api/validate-key` and stores the validated key in `wolfcha_validated_*_key`.
+   423→3. **Model config** (lines 936–1019) — revealed only when at least one LLM key is configured:
+   424→   - **Generator model** dropdown (line 946) — bound to `setGeneratorModelState`. Options from `availableModelPool` (= `ALL_MODELS` filtered by configured providers, or `AVAILABLE_MODELS` if custom key off).
+   425→   - **Summary model** dropdown (line 960).
+   426→   - **Review model** dropdown (line 974).
+   427→   - **Candidate AI-player models** multi-select (line 991) — `DropdownMenuCheckboxItem` list of `playerModelPool`, bound to `setSelectedModelsState`. Persisted via `setSelectedModels(models)` on close.
+   428→4. On tab close, `handleApplyModels` (lines ~280–335) calls `setSelectedModels`, `setGeneratorModel`, `setSummaryModel`, `setReviewModel` to persist to localStorage.
+   429→
+   430→`/src/app/ai-models/page.tsx` (600 lines) is **NOT** a model selector — it's a static marketing/SEO page describing DeepSeek, Qwen, Kimi, Claude, Gemini etc. with hardcoded `ModelProfile[]` data and no interactive state. It does not import from `@/types/game` or `@/lib/api-keys`.
+   431→
+   432→---
+   433→
+   434→## 7. Environment Variables (from `.env.example` and `.env.local`)
+   435→
+   436→```
+   437→ZENMUX_API_KEY            # ZenMux (default LLM gateway)
+   438→TOKENDANCE_API_KEY        # TokenDance gateway
+   439→TOKENDANCE_BASE_URL       # https://tokendance.agent-universe.cn/gateway/v1
+   440→DASHSCOPE_API_KEY         # Aliyun Bailian
+   441→MINIMAX_API_KEY           # MiniMax TTS
+   442→MINIMAX_GROUP_ID          # MiniMax group id (required header)
+   443→MINIMAX_API_BASE_URL      # https://api.minimaxi.com (or .chat)
+   444→MINIMAX_TTS_MODEL         # speech-01-turbo
+   445→```
+   446→
+   447→No OpenAI/Anthropic/Google API keys are used directly — they all flow through ZenMux/TokenDance/DashScope as aggregators.
+   448→
+   449→---
+   450→
+   451→## 8. Replacement Targets for z.ai SDK Migration
+   452→
+   453→When replacing with z.ai's SDK, the following files need attention (in priority order):
+   454→
+   455→### Must replace (LLM core)
+   456→1. **`src/app/api/chat/route.ts`** (979 lines) — replace the three upstream `fetch()` calls (ZenMux at line 549, DashScope at line 400, TokenDance at line 476) with z.ai SDK calls. Or, if z.ai is OpenAI-compatible, just swap the URLs/keys and keep the rest. Be aware of:
+   457→   - The SSE streaming passthrough at lines 776–782, 878–884, 960–968 — if z.ai's SSE format differs, this will break streaming.
+   458→   - The `reasoning` vs `thinking` vs `reasoning_effort` translation per provider.
+   459→   - The `response_format` gating by `supportsResponseFormat()`.
+   460→2. **`src/lib/llm.ts`** (869 lines) — if the response shape from z.ai differs from OpenAI's `ChatCompletionResponse`, update `generateCompletion` (line 582), `generateCompletionBatch` (line 658), and `generateCompletionStream` (line 752 SSE parser).
+   461→3. **`src/types/game.ts`** — update `MODEL_IDS`, `ALL_MODELS`, `PROJECT_MODELS`, `AVAILABLE_MODELS`, `DEFAULT_MODEL_CONFIG` to use z.ai model ids. The `ModelRef.provider` union (`"zenmux" | "dashscope" | "tokendance"`) needs to grow a `"zai"` option (or replace existing ones).
+   462→4. **`src/lib/api-keys.ts`** — add `getZaiApiKey()` / `setZaiApiKey()` / `hasZaiKey()` / `wolfcha_zai_api_key` storage. Update `isCustomKeyEnabled()` and `resolveModelWhenCustomEnabled()`.
+   463→5. **`src/app/api/validate-key/route.ts`** — add a z.ai validation branch.
+   464→
+   465→### Must replace (TTS)
+   466→6. **`src/app/api/tts/route.ts`** (400 lines) — replace MiniMax T2A V2 call with z.ai TTS. Watch out:
+   467→   - The response is currently raw binary audio bytes — if z.ai returns base64 JSON, adjust `respondAudio()` / `sniffAudioMime()`.
+   468→   - The voice_id field in `voice_setting` is MiniMax-specific; z.ai will have its own voice catalog.
+   469→7. **`src/lib/voice-constants.ts`** — replace `VOICE_PRESETS` / `ENGLISH_VOICE_PRESETS` / `DEFAULT_VOICE_ID` with z.ai voice ids.
+   470→8. **`src/lib/audio-manager.ts`** — header builder `buildTtsHeaders()` (line 34) adds `X-Minimax-Api-Key` / `X-Minimax-Group-Id`; replace with z.ai headers (likely just `Authorization: Bearer` or an `x-zai-api-key`).
+   471→9. **`src/lib/api-keys.ts`** — remove `getMinimaxApiKey` / `getMinimaxGroupId` usage or keep them as legacy; add z.ai equivalents.
+   472→10. **`src/lib/narrator-voice.ts`** — `NARRATOR_VOICE_ID` / `NARRATOR_VOICE_ID_EN` constants are MiniMax voice ids; only matters if you regenerate the pre-baked narrator MP3s (via `scripts/generate-narrator-audio.ts`). The runtime playback path (`narrator-audio-player.ts`) does not depend on these ids.
+   473→
+   474→### Optional replace (STT)
+   475→11. **`src/app/api/stt/route.ts`** (11 lines) — currently a 410 stub. If z.ai provides STT, implement it here. The frontend contract expected by `VoiceRecorder.tsx` is `POST {audio: base64, format: "wav"}` → `{text: string}`.
+   476→
+   477→### UI updates
+   478→12. **`src/components/game/UserProfileModal.tsx`** — replace TokenDance/ZenMux/DashScope/MiniMax key input sections with z.ai key input. Update provider labels in `getProviderLabel()`. The model dropdowns will auto-update if `ALL_MODELS` is changed.
+   479→13. **`src/components/game/WelcomeScreen.tsx`** — sponsor cards reference ZenMux/MiniMax/TokenDance/Bailian/OpenCreator. Update or remove as desired (cosmetic only).
+   480→14. **`src/app/ai-models/page.tsx`** — static marketing content; update model names/descriptions to match the new z.ai lineup (cosmetic only).
+   481→
+   482→### Server-side batch proxy
+   483→15. **`src/app/api/vote-batch/route.ts`** (71 lines) — passes through to `/api/chat`, so no changes needed if `/api/chat` is updated. Just verify the header forwarding (lines 39–42) includes any new z.ai header.
+   484→
+   485→### Other notes
+   486→- `src/lib/ai-config.ts` (temperature presets) — provider-agnostic, no changes needed.
+   487→- `src/lib/character-generator.ts`, `src/lib/game-master.ts`, `src/lib/game-analysis.ts` — they all go through `llm.ts`, so as long as `llm.ts` and `types/game.ts` are updated correctly, these need no changes.
+   488→- `src/app/api/check-config/route.ts` — already deprecated (returns 404).
+   489→- The `scripts/generate-narrator-audio.ts` script generates the pre-baked MP3s; if you want narrator voices from z.ai, rerun this script after swapping the TTS call inside it.
+   490→
+   491→---
+   492→Task ID: 2
+   493→Agent: main (Z.ai Code)
+   494→Task: Replace all LLM/AI with z.ai SDK, replace TTS with z.ai TTS, change landing to a clean start screen
+   495→
+   496→Work Log:
+   497→- Read z.ai LLM and TTS skill docs; confirmed z-ai-web-dev-sdk API shapes (chat.completions.create + audio.tts.create).
+   498→- Inspected z-ai-web-dev-sdk/dist/index.js to confirm streaming returns a ReadableStream of SSE "data:" lines (passthrough-compatible with wolfcha's frontend SSE parser).
+   499→- Rewrote src/app/api/chat/route.ts (was 979 lines routing to ZenMux/Dashscope/TokenDance) → ~250 lines using zai.chat.completions.create. Supports single (JSON), batch ({requests:[...]}→{results:[...]}), and streaming (SSE passthrough). Normalises z.ai responses to OpenAI-compatible shape. Added withRetry() for 429/5xx backoff.
+   500→- Rewrote src/app/api/tts/route.ts (was 400 lines calling MiniMax T2A V2) → ~170 lines using zai.audio.tts.create. Splits text >1024 chars into chunks, concatenates mp3 buffers, sniffs MIME. Added withRetry().
+   501→- Updated src/types/game.ts: ModelRef.provider narrowed to "zai"; MODEL_IDS.zai = {glm:"glm-4.6", glmFlash:"glm-4.5-flash"}; ALL_MODELS/PROJECT_MODELS/AVAILABLE_MODELS all z.ai; DEFAULT_MODEL_CONFIG all glm.
+   502→- Updated src/lib/voice-constants.ts: VOICE_PRESETS now the 7 z.ai voices (tongtong/chuichui/xiaochen/jam/kazi/douji/luodo) with gender+age mapping; resolveVoiceId picks valid z.ai voice or falls back by gender/age.
+   503→- Updated src/lib/llm.ts: Provider type = "zai"; resolveApiKeySource always "project"; buildCustomKeyHeaders returns {}; removed unused provider-key imports.
+   504→- Updated src/lib/api-keys.ts: isCustomKeyEnabled() → false; validateApiKeyBalance() → {valid:true}; resolveModelWhenCustomEnabled only allows "zai".
+   505→- Updated src/lib/game-master.ts + character-generator.ts: fallback ModelRef provider "zai"; removed hasZenmuxKey/hasDashscopeKey/hasTokendanceKey checks.
+   506→- Rewrote src/app/api/vote-batch/route.ts: removed auth + custom-key headers, delegates straight to /api/chat.
+   507→- Installed z-ai-web-dev-sdk@0.0.18 into project node_modules (was only global).
+   508→- Rewrote src/components/game/WelcomeScreen.tsx (was 1579 lines with sponsor/auth/share/credit modals) → ~330 lines: clean dark gradient hero with name input, 8-12 player count grid, 3 difficulty cards, role preference chips, prominent "Start Game" button, 3 feature highlight cards, footer crediting z.ai. Same prop interface so page.tsx needed no changes. Kept GameSetupModal + LocaleSwitcher.
+   509→- Browser-verified: new start screen renders in both en/zh, settings modal works, mobile (375px) responsive, no console errors.
+   510→- Confirmed /api/chat and /api/tts correctly invoke z.ai SDK (429 rate-limit errors come straight from z.ai API, proving wiring is correct; official z-ai CLI returns the same 429, confirming account-level quota exhaustion).
+   511→
+   512→Stage Summary:
+   513→- All LLM calls now go through z.ai (z-ai-web-dev-sdk chat.completions.create) via /api/chat; streaming SSE passthrough preserved.
+   514→- All TTS now goes through z.ai (z-ai-web-dev-sdk audio.tts.create) via /api/tts; 7 z.ai voices mapped by gender/age.
+   515→- Model catalog reduced to 2 z.ai models (glm-4.6, glm-4.5-flash); provider field = "zai".
+   516→- Landing page is now a focused game start screen (name + player count + difficulty + role + Start Game button) in dark amber/red retro theme, fully responsive, i18n-aware (zh/en).
+   517→- NOTE: z.ai API is currently returning HTTP 429 (account daily quota exhausted from testing). The integration is correct and will work once quota resets. withRetry() handles transient 429s with exponential backoff.
+   518→
+   519→---
+   520→Task ID: 3
+   521→Agent: main (Z.ai Code)
+   522→Task: Fix "stuck on players entering" — root cause + clear quota error UX
+   523→
+   524→Work Log:
+   525→- Inspected dev.log: every /api/chat call returned 500 → z.ai 429 "Too many requests".
+   526→- Ran a raw fetch probe against z.ai (with proper X-Token header) and read response headers:
+   527→    x-ratelimit-user-daily-remaining: 0   ← daily quota EXHAUSTED
+   528→    x-ratelimit-user-10min-limit: 30 / remaining: 29
+   529→  Confirmed z.ai official CLI also returns 429 → account-level daily quota used up, not a code bug.
+   530→- Root cause of "stuck": character-generator retried 2x, llm.ts fetchWithRetry retried 4x (429 is in RETRYABLE_STATUS), and the catch in useGameLogic did setGameStarted(false) but the toast wasn't surfacing clearly, so users saw an empty game table spinning.
+   531→- Fixes:
+   532→  1. /api/chat route: on z.ai 429, return HTTP 429 with body {error:"[QUOTA_EXHAUSTED] z.ai 每日调用额度已用尽..."} so the frontend can detect it.
+   533→  2. llm.ts fetchWithRetry: when 429 + body contains [QUOTA_EXHAUSTED]/daily/额度, return immediately WITHOUT retry (daily quota won't recover by retrying).
+   534→  3. llm.ts isQuotaExhaustedError: now also recognises status 429 + [QUOTA_EXHAUSTED] marker (previously only 402).
+   535→  4. character-generator.ts: on quota error, abort retry immediately (removed the isCustomKeyEnabled() gate so it applies to built-in z.ai quota too).
+   536→  5. useGameLogic.ts startGame catch: call toast.error() synchronously (setTimeout deferral caused sonner to drop the toast during table unmount). Hardcoded clear Chinese message "AI 调用额度已用尽 / z.ai 每日免费调用额度已耗尽，请稍后重试（通常次日重置）。" with 15s duration.
+   537→  6. Updated i18n quotaExhausted messages in zh.json/en.json.
+   538→- Browser-verified end-to-end: click Start → ~7s later page returns to welcome screen + sonner toast appears at top-center reading "AI 调用额度已用尽...". Confirmed via document.querySelector('[data-sonner-toast]').textContent.
+   539→
+   540→Stage Summary:
+   541→- "卡在玩家入场" root cause = z.ai account daily quota = 0 (HTTP 429). Not a code bug.
+   542→- 429 = "Too Many Requests". z.ai enforces two limits: daily (now exhausted) + 30 req / 10 min (still has headroom). Daily resets ~next day 00:00 Beijing time.
+   543→- UX fixed: instead of spinning forever, the game now fails fast (~7s), returns to the welcome screen, and shows a clear toast explaining the quota situation.
+   544→

@@ -2176,7 +2176,7 @@ input[type="submit"]:not(:disabled),
 .wc-notebook-fab {
   position: fixed;
   bottom: 30px;
-  right: 30px;
+  left: 30px;
   width: 56px;
   height: 56px;
   border-radius: 50%;
@@ -2193,6 +2193,23 @@ input[type="submit"]:not(:disabled),
   z-index: 100;
 }
 
+/* 笔记按钮(放在左下角按钮组内,不 fixed) */
+.wc-notebook-fab-static {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--bg-dark);
+  border: 2px solid var(--color-gold);
+  color: var(--color-gold);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.50);
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
 .wc-notebook-panel {
   max-width: 92vw;
 }
@@ -2201,7 +2218,7 @@ input[type="submit"]:not(:disabled),
   .wc-notebook-fab {
     display: none;
     bottom: calc(16px + env(safe-area-inset-bottom));
-    right: 16px;
+    left: 16px;
     width: 52px;
     height: 52px;
   }

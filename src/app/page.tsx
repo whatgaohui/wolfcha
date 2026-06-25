@@ -13,6 +13,7 @@ import {
   Drop,
   Crosshair,
   GearSix,
+  Brain,
 } from "@phosphor-icons/react";
 import {
   WerewolfIcon,
@@ -43,6 +44,7 @@ import { PlayerCardCompact } from "@/components/game/PlayerCardCompact";
 import { DialogArea } from "@/components/game/DialogArea";
 import { BottomActionPanel } from "@/components/game/BottomActionPanel";
 import { Notebook } from "@/components/game/Notebook";
+import { AIAssistPanel } from "@/components/game/AIAssistPanel";
 import { GameBackground } from "@/components/game/GameBackground";
 import { PlayerDetailModal } from "@/components/game/PlayerDetailModal";
 import { RoleRevealOverlay } from "@/components/game/RoleRevealOverlay";
@@ -528,6 +530,7 @@ export default function Home() {
   // UI 状态
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [isNotebookOpen, setIsNotebookOpen] = useState(false);
+  const [isAIAssistOpen, setIsAIAssistOpen] = useState(false);
   const [isEventLogOpen, setIsEventLogOpen] = useState(false);
   const [isDevConsoleOpen, setIsDevConsoleOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -1688,18 +1691,44 @@ export default function Home() {
   )}
 </AnimatePresence>
 
-      {/* 笔记本悬浮按钮 - 参考 style-unification-preview.html */}
-      <button
-        onClick={() => {
-          setIsNotebookOpen((v) => !v);
-          setIsEventLogOpen(false);
-        }}
-        className="wc-notebook-fab"
-        title={isNotebookOpen ? t("page.closeNotebook") : t("page.openNotebook")}
-        type="button"
-      >
-        {isNotebookOpen ? <X size={24} /> : <NotePencil size={24} />}
-      </button>
+      {/* 左下角悬浮按钮组: 笔记 + AI助手 */}
+      <div className="fixed bottom-5 left-5 z-[100] flex flex-col gap-3">
+        <button
+          onClick={() => {
+            setIsAIAssistOpen((v) => !v);
+            setIsNotebookOpen(false);
+            setIsEventLogOpen(false);
+          }}
+          className="w-14 h-14 rounded-full bg-gradient-to-br from-amber-500 to-red-600 shadow-lg flex items-center justify-center transition-all hover:scale-110"
+          title="AI 助手 - 局势分析与发言指导"
+          type="button"
+        >
+          {isAIAssistOpen ? <X size={24} className="text-white" /> : <Brain size={26} weight="fill" className="text-white" />}
+        </button>
+        <button
+          onClick={() => {
+            setIsNotebookOpen((v) => !v);
+            setIsAIAssistOpen(false);
+            setIsEventLogOpen(false);
+          }}
+          className="wc-notebook-fab-static"
+          title={isNotebookOpen ? t("page.closeNotebook") : t("page.openNotebook")}
+          type="button"
+        >
+          {isNotebookOpen ? <X size={24} /> : <NotePencil size={24} />}
+        </button>
+      </div>
+
+      {/* AI 助手面板 */}
+      {showTable && (
+        <AIAssistPanel
+          isOpen={isAIAssistOpen}
+          onClose={() => setIsAIAssistOpen(false)}
+          gameState={gameState}
+          humanPlayer={humanPlayer ?? null}
+          humanName={humanName}
+        />
+      )}
 
       <AnimatePresence>
         {isNotebookOpen && (
@@ -1709,7 +1738,7 @@ export default function Home() {
             animate={isMobile ? { opacity: 1, y: 0 } : { opacity: 1, x: 0, y: 0, scale: 1 }}
             exit={isMobile ? { opacity: 0, y: 24 } : { opacity: 0, x: 24, y: 12, scale: 0.98 }}
             transition={{ type: "spring", stiffness: 400, damping: 30 }}
-            className="wc-notebook-panel fixed bottom-20 right-5 z-50 w-[360px] h-[480px] max-h-[70vh]"
+            className="wc-notebook-panel fixed bottom-20 left-5 z-50 w-[360px] h-[480px] max-h-[70vh]"
           >
             <div className="h-full rounded-t-2xl md:rounded-lg overflow-hidden border shadow-2xl glass-panel glass-panel--strong">
               <Notebook />
@@ -1747,7 +1776,11 @@ export default function Home() {
       {/* 开发者模式 - 只在游戏开始后显示 */}
       {showTable && showDevTools && (
         <>
-          <DevModeButton onClick={() => setIsDevConsoleOpen(true)} />
+          <DevModeButton
+            onClick={() => setIsDevConsoleOpen(true)}
+            onViewAnalysis={handleViewAnalysis}
+            gamePhase={gameState.phase}
+          />
           <DevConsole isOpen={isDevConsoleOpen} onClose={() => setIsDevConsoleOpen(false)} />
         </>
       )}

@@ -2003,27 +2003,28 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 // ============ 悬浮入口按钮 ============
-export function DevModeButton({ onClick }: { onClick: () => void }) {
+export function DevModeButton({ onClick, onViewAnalysis, gamePhase }: { onClick: () => void; onViewAnalysis?: () => void; gamePhase?: string }) {
   const t = useTranslations();
-  const router = useRouter();
   const showDevTools =
     process.env.NODE_ENV !== "production" && (process.env.NEXT_PUBLIC_SHOW_DEVTOOLS ?? "true") === "true";
 
   if (!showDevTools) return null;
 
-  const handleTestAnalysis = () => {
-    router.push("/test-analysis");
-  };
+  // 复盘报告仅在游戏结束时可点;进行中禁用并降低视觉优先级。
+  const isGameEnd = gamePhase === "GAME_END";
+  const canViewAnalysis = isGameEnd && Boolean(onViewAnalysis);
 
   return (
     <div className="fixed bottom-5 right-5 z-[99] flex flex-col gap-2">
-      <button
-        onClick={handleTestAnalysis}
-        className="w-12 h-12 rounded-full bg-emerald-500 hover:bg-emerald-400 shadow-lg flex items-center justify-center transition-all hover:scale-110"
-        title="测试复盘报告"
-      >
-        <ChartBar size={24} className="text-gray-900" />
-      </button>
+      {canViewAnalysis && (
+        <button
+          onClick={onViewAnalysis}
+          className="w-12 h-12 rounded-full bg-emerald-500 hover:bg-emerald-400 shadow-lg flex items-center justify-center transition-all hover:scale-110"
+          title="测试复盘报告"
+        >
+          <ChartBar size={24} className="text-gray-900" />
+        </button>
+      )}
       <button
         onClick={onClick}
         className="w-12 h-12 rounded-full bg-yellow-500 hover:bg-yellow-400 shadow-lg flex items-center justify-center transition-all hover:scale-110"
