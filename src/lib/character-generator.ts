@@ -247,7 +247,7 @@ const buildBaseProfilesPrompt = (count: number, scenario: GameScenario) => {
 };
 
 const buildCharacterSchemaLine = (p: BaseProfile): string => (
-  `  { "displayName": "${p.displayName}", "persona": { "voiceRules": string[], "werewolfExperience": string, "vocabularyStyle": string, "reasoningStyle": string, "speechLengthHabit": string, "pressureStyle": string, "uncertaintyStyle": string, "mistakePattern": string, "wolfDeceptionStyle": string, "mbti": "${p.mbti}", "gender": "${p.gender}", "age": ${p.age} }, "playerMind": { "courage": string, "memoryBias": string, "suspicionThreshold": string, "selfProtection": string, "logicDepth": string, "tablePresence": string } }`
+  `  { "displayName": "${p.displayName}", "persona": { "voiceRules": string[], "werewolfExperience": string, "vocabularyStyle": string, "reasoningStyle": string, "wolfDeceptionStyle": string, "mbti": "${p.mbti}", "gender": "${p.gender}", "age": ${p.age} }, "playerMind": { "courage": string, "suspicionThreshold": string, "selfProtection": string } }`
 );
 
 const normalizeGeneratedCharacters = (
@@ -520,6 +520,83 @@ const buildFullPersonasPrompt = (scenario: GameScenario, allProfiles: BaseProfil
   });
 };
 
+/** 合并版 prompt：一次生成完整角色（base info + persona + playerMind） */
+// HMR trigger
+const buildMergedPrompt = (count: number, scenario: GameScenario) => {
+  const isZh = getI18n().locale === "zh";
+  if (isZh) {
+    return `你是狼人杀游戏的角色设计师。
+
+【当前剧本背景】
+标题：${scenario.title}
+背景：${scenario.description}
+角色建议：${scenario.rolesHint}
+
+【任务】
+生成 ${count} 个玩家角色，每个角色包含基础信息和完整人设。这些是"玩狼人杀的普通人"，不是悬疑剧本的角色。
+
+【重要：字段值用短语(5-15字)，不要完整句子】
+例如：werewolfExperience 写"信息博弈视角"而非"这个人认为狼人杀是信息博弈关键在于控制信息流"
+
+【persona 字段】（只生成以下 4 个）
+- werewolfExperience：短语，怎么理解狼人杀
+- vocabularyStyle：短语，常用词和术语密度
+- reasoningStyle：短语，最先注意什么
+- wolfDeceptionStyle：短语，拿狼时怎么伪装
+
+【playerMind 字段】（只生成以下 3 个）
+- courage：短语，敢不敢诈/硬推
+- suspicionThreshold：短语，几条线索改站边
+- selfProtection：短语，被攻击时怎么应对
+
+【voiceRules】每项 2-4 字短语，1-2 个，如 ["冷静","数据流"]
+
+【输出格式】
+输出 JSON 数组（共 ${count} 个），每个对象严格匹配以下 schema：
+[{"displayName":"中文名2-3字","gender":"male或female","age":25,"mbti":"INTJ","basicInfo":"一句话职业","persona":{"voiceRules":["短语"],"werewolfExperience":"短语","vocabularyStyle":"短语","reasoningStyle":"短语","wolfDeceptionStyle":"短语"},"playerMind":{"courage":"短语","suspicionThreshold":"短语","selfProtection":"短语"}}]
+
+【重要】
+- 名字各不相同，符合场景名字风格
+- 年龄 20-55，mbti 是 4 字母
+- 只输出 JSON 数组，不要 markdown 代码块、不要解释文字
+- 每个字段一句话短语，不要长篇大论`;
+  }
+  return `You are a character designer for a Werewolf game.
+
+[Scene]
+${scenario.title} - ${scenario.description}
+Role hints: ${scenario.rolesHint}
+Note: scene only flavors identity and names; gameplay stays on Werewolf itself.
+
+[Task]
+Generate ${count} player characters, each with base info and full persona. These are "ordinary people playing Werewolf", not mystery characters.
+
+[IMPORTANT: field values must be SHORT PHRASES (3-10 words), NOT full sentences]
+e.g. werewolfExperience: "info-game perspective" NOT "this person thinks Werewolf is about controlling information flow"
+
+[persona fields] (generate ONLY these 4)
+- werewolfExperience: short phrase, how they view Werewolf
+- vocabularyStyle: short phrase, jargon density
+- reasoningStyle: short phrase, what they notice first
+- wolfDeceptionStyle: short phrase, wolf disguise approach
+
+[playerMind fields] (generate ONLY these 3)
+- courage: short phrase, bluff/push willingness
+- suspicionThreshold: short phrase, clues needed to switch
+- selfProtection: short phrase, defense when attacked
+
+[voiceRules] each 2-4 word phrase, 1-2 items, e.g. ["calm","analytical"]
+
+[Output format]
+JSON array (${count} objects), each matching this schema:
+[{"displayName":"Name","gender":"male or female","age":25,"mbti":"INTJ","basicInfo":"one-line job","persona":{"voiceRules":["phrase"],"werewolfExperience":"phrase","vocabularyStyle":"phrase","reasoningStyle":"phrase","wolfDeceptionStyle":"phrase"},"playerMind":{"courage":"phrase","suspicionThreshold":"phrase","selfProtection":"phrase"}}]
+
+[Important]
+- Unique names, age 20-55, mbti 4 letters
+- Output ONLY the JSON array, no markdown, no explanation
+- One short phrase per field, keep it concise`;
+};
+
 export async function generateCharacters(
   count: number,
   scenario?: GameScenario,
@@ -531,41 +608,22 @@ export async function generateCharacters(
   const usedScenario = scenario ?? getRandomScenario();
   const runOnce = async () => {
     const startTime = Date.now();
-    const basePrompt = buildBaseProfilesPrompt(count, usedScenario);
+    // 合并两阶段：一次调用生成完整角色（base info + persona + playerMind），
+    // 省掉单独的 base profiles 调用（~7s），总耗时减半。
+    const mergedPrompt = buildMergedPrompt(count, usedScenario);
 
-    // 动态计算 max_tokens：每个角色约需 300-400 tokens，加上 JSON 结构开销
-    const baseMaxTokens = Math.max(2400, count * 350 + 600);
-
-    const baseResult = await generateJSON<unknown>({
-      model: getGeneratorModel(),
-      messages: [{ role: "user", content: basePrompt }],
-      temperature: GAME_TEMPERATURE.CHARACTER_GENERATION,
-      max_tokens: baseMaxTokens,
-      reasoning: CHARACTER_GENERATOR_REASONING,
-    });
-
-    const normalizedBase = normalizeBaseProfiles(baseResult);
-    const baseProfiles = normalizedBase.profiles;
-
-    if (!isValidBaseProfiles(baseProfiles, count)) {
-      throw new Error("Base profile generation returned invalid schema");
-    }
-
-    options?.onBaseProfiles?.(baseProfiles);
-
-    const fullPrompt = buildFullPersonasPrompt(usedScenario, baseProfiles);
-    
-    // 使用流式生成，每解析出一个角色就立即调用回调
+    // 流式生成：每解析出一个完整角色就立即回调
     const finalizedCharacters: GeneratedCharacter[] = [];
     const emittedIndices = new Set<number>();
+    const emittedBaseProfiles: BaseProfile[] = [];
     let accumulatedContent = "";
-    
-    // 完整角色生成需要 persona + playerMind，按更宽预算生成
-    const fullMaxTokens = Math.max(9000, count * 1250 + 1800);
-    
+
+    // 精简字段后每角色约 400 tokens
+    const fullMaxTokens = Math.max(3500, count * 450 + 600);
+
     const stream = generateCompletionStream({
       model: getGeneratorModel(),
-      messages: [{ role: "user", content: fullPrompt }],
+      messages: [{ role: "user", content: mergedPrompt }],
       temperature: GAME_TEMPERATURE.CHARACTER_GENERATION,
       max_tokens: fullMaxTokens,
       reasoning: CHARACTER_GENERATOR_REASONING,
@@ -573,58 +631,64 @@ export async function generateCharacters(
 
     for await (const chunk of stream) {
       accumulatedContent += chunk;
-      
-      // 使用正则提取完整的角色对象
-      // 匹配 {"displayName": "...", "persona": {...}, "playerMind": {...}} 结构
+
+      // 提取完整的角色对象（含 displayName + persona + playerMind + base info）
       const cleaned = stripMarkdownCodeFences(accumulatedContent);
-      
-      // 找到所有可能完整的角色对象
-      // 通过匹配 displayName 后跟 persona 和 playerMind 对象的闭合 } 来识别完整角色
-      const characterPattern = /\{\s*"displayName"\s*:\s*"[^"]+"\s*,\s*"persona"\s*:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*,\s*"playerMind"\s*:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*\}/g;
+      const characterPattern = /\{\s*"displayName"\s*:\s*"[^"]+"\s*,\s*"gender"\s*:\s*"[^"]+"\s*,\s*"age"\s*:\s*\d+[^}]*"persona"\s*:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*,\s*"playerMind"\s*:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*\}/g;
       const matches = cleaned.match(characterPattern);
-      
+
       if (matches) {
         for (const match of matches) {
           try {
-            const c = parseLLMJson<GeneratedCharacter>(match);
-            if (!c) continue;
-            if (!c.displayName) continue;
-            
-            // 找到对应的 profile index
-            const profileIndex = baseProfiles.findIndex(p => 
-              p.displayName === c.displayName && !emittedIndices.has(baseProfiles.indexOf(p))
+            const c = parseLLMJson<GeneratedCharacter & { gender?: string; age?: number; mbti?: string; basicInfo?: string }>(match);
+            if (!c || !c.displayName) continue;
+
+            // 用 displayName 去重（合并模式下没有预生成的 baseProfiles 数组）
+            const existingIndex = finalizedCharacters.findIndex(
+              (fc) => fc?.displayName === c.displayName
             );
-            
-            if (profileIndex === -1) continue;
-            
-            const profile = baseProfiles[profileIndex];
-            const normalizedCharacter = normalizeGeneratedCharacterForProfile(c, profile);
+            if (existingIndex !== -1) continue; // 已处理
 
-            if (normalizedCharacter && isValidPersonaForProfile(normalizedCharacter.persona, profile) && isValidPlayerMind(normalizedCharacter.playerMind)) {
-              emittedIndices.add(profileIndex);
+            const index = emittedBaseProfiles.length;
+            emittedBaseProfiles.push({
+              displayName: c.displayName,
+              gender: (c.gender === "female" ? "female" : "male") as "male" | "female",
+              age: typeof c.age === "number" ? c.age : 25,
+              mbti: c.mbti || "INTJ",
+              basicInfo: c.basicInfo || "",
+            });
 
-              const voiceId = resolveVoiceId(
-                normalizedCharacter.persona.voiceId,
-                normalizedCharacter.persona.gender,
-                normalizedCharacter.persona.age,
-                "zh" as AppLocale
-              );
+            // 名字一出就触发 baseProfiles 回调（让前端先显示名字）
+            options?.onBaseProfiles?.([...emittedBaseProfiles]);
 
-              const character: GeneratedCharacter = {
-                displayName: profile.displayName,
-                persona: {
-                  ...normalizedCharacter.persona,
-                  basicInfo: profile.basicInfo,
-                  voiceId,
-                  relationships: undefined,
-                },
-                playerMind: normalizedCharacter.playerMind,
-              };
+            // 构建完整角色
+            const persona = c.persona;
+            if (!persona || !Array.isArray(persona.voiceRules) || persona.voiceRules.length === 0) continue;
 
-              finalizedCharacters[profileIndex] = character;
-              options?.onCharacter?.(profileIndex, character);
-              console.log(`[character-gen] emitted character ${profileIndex}: ${character.displayName}`);
-            }
+            const voiceId = resolveVoiceId(
+              persona.voiceId,
+              persona.gender,
+              persona.age,
+              "zh" as AppLocale
+            );
+
+            const character: GeneratedCharacter = {
+              displayName: c.displayName,
+              persona: {
+                ...persona,
+                gender: persona.gender || (emittedBaseProfiles[index].gender as "male" | "female" | "nonbinary"),
+                age: persona.age || emittedBaseProfiles[index].age,
+                mbti: persona.mbti || emittedBaseProfiles[index].mbti,
+                basicInfo: emittedBaseProfiles[index].basicInfo,
+                voiceId,
+                relationships: undefined,
+              },
+              playerMind: c.playerMind,
+            };
+
+            finalizedCharacters[index] = character;
+            options?.onCharacter?.(index, character);
+            console.log(`[character-gen] emitted character ${index}: ${character.displayName}`);
           } catch {
             // 解析失败是正常的
           }
@@ -633,27 +697,24 @@ export async function generateCharacters(
     }
 
     // 流式结束后，检查是否所有角色都已生成
-    if (finalizedCharacters.filter(Boolean).length < baseProfiles.length) {
+    if (finalizedCharacters.filter(Boolean).length < count) {
       // 回退到完整解析
       const cleaned = stripMarkdownCodeFences(accumulatedContent);
       const fullResult = parseLLMJson<unknown>(cleaned);
       if (!fullResult) {
         throw new Error("Character generation returned invalid JSON");
       }
-      
+
       const normalized = normalizeGeneratedCharacters(fullResult);
-      const alignedCharacters = alignCharactersToProfiles(normalized.characters, baseProfiles);
+      const chars = normalized.characters;
 
-      if (!alignedCharacters) {
-        throw new Error("Character generation returned invalid schema");
-      }
-
-      // 补充未生成的角色
-      for (let i = 0; i < alignedCharacters.length; i++) {
+      // 补充未生成的角色（合并模式下无 baseProfiles，直接用生成结果）
+      for (let i = 0; i < chars.length; i++) {
         if (finalizedCharacters[i]) continue;
-        
-        const c = alignedCharacters[i];
-        const profile = baseProfiles[i];
+
+        const c = chars[i];
+        if (!c?.persona) continue;
+
         const voiceId = resolveVoiceId(
           c.persona.voiceId,
           c.persona.gender,
@@ -662,10 +723,9 @@ export async function generateCharacters(
         );
 
         const character: GeneratedCharacter = {
-          displayName: profile.displayName,
+          displayName: c.displayName,
           persona: {
             ...c.persona,
-            basicInfo: profile.basicInfo, // Carry over basicInfo from BaseProfile
             voiceId,
             relationships: undefined,
           },
@@ -681,7 +741,7 @@ export async function generateCharacters(
       type: "character_generation",
       request: { 
         model: getGeneratorModel(),
-        messages: [{ role: "user", content: fullPrompt }],
+        messages: [{ role: "user", content: mergedPrompt }],
       },
       response: { 
         content: JSON.stringify(finalizedCharacters.map((c) => ({
