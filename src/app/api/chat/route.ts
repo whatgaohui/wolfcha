@@ -74,7 +74,8 @@ function buildZaiBody(options: GenerateOptions) {
   };
 
   if (typeof options.temperature === "number" && Number.isFinite(options.temperature)) {
-    body.temperature = options.temperature;
+    // z.ai requires temperature in [0, 1]; wolfcha uses up to 1.2 (WILD), so clamp.
+    body.temperature = Math.min(1, Math.max(0, options.temperature));
   }
   if (typeof options.max_tokens === "number" && Number.isFinite(options.max_tokens)) {
     body.max_tokens = Math.max(16, Math.floor(options.max_tokens));
