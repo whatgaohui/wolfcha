@@ -719,7 +719,7 @@ export function useGameLogic() {
     // 白狼王自爆带走猎人时，猎人可以开枪（非毒死，技能可发动）
     const boomTarget = currentState.players.find((p) => p.seat === targetSeat);
     if (boomTarget?.role === "Hunter" && currentState.roleAbilities.hunterCanShoot) {
-      await delay(1200);
+      await delay(600);
       const hunterFn = hunterDeathRef.current;
       if (hunterFn) await hunterFn(currentState, boomTarget, false);
       return true;
@@ -732,7 +732,7 @@ export function useGameLogic() {
       return true;
     }
 
-    await delay(1200);
+    await delay(600);
     const proceedFn = proceedToNightRef.current;
     if (proceedFn) await proceedFn(currentState, token);
     return true;
@@ -785,7 +785,7 @@ export function useGameLogic() {
     // 播放旁白语音
     await playNarrator("nightFall");
 
-    await delay(250);
+    await delay(150);
     if (!isTokenValid(token)) return;
 
     setDialogue(speakerHost, systemMessages.summarizingDay, false);
@@ -1794,7 +1794,7 @@ export function useGameLogic() {
       const next = afterLastWordsRef.current;
       afterLastWordsRef.current = null;
       if (next) {
-        await delay(500);
+        await delay(150);
         await next(gameStateRef.current);
       }
       return;
@@ -1804,7 +1804,7 @@ export function useGameLogic() {
     const startGameId = startState.gameId;
     const startPhase = startState.phase;
 
-    await delay(300);
+    await delay(150);
 
     const liveState = gameStateRef.current;
     if (liveState.gameId !== startGameId) return;
@@ -1825,7 +1825,7 @@ export function useGameLogic() {
     }
 
     setWaitingForNextRound(false);
-    await delay(300);
+    await delay(150);
 
     const liveState = gameStateRef.current;
     if (liveState.gameId !== startGameId) return;
@@ -1870,7 +1870,7 @@ export function useGameLogic() {
       setGameState(nextState);
       gameStateRef.current = nextState;
 
-      await delay(200);
+      await delay(150);
       await badgePhase.maybeResolveBadgeElection(nextState);
       return;
     }
@@ -1895,7 +1895,7 @@ export function useGameLogic() {
     });
 
     // 等待状态更新完成
-    await delay(200);
+    await delay(150);
     
     // 从 ref 获取最新状态（setGameState 的函数式更新会确保 prevState 是最新的）
     const latestState = updatedState || gameStateRef.current;
@@ -2062,7 +2062,7 @@ export function useGameLogic() {
         return;
       }
 
-      await delay(1200);
+      await delay(600);
       if (diedAtNight) {
         currentState = transitionPhase(currentState, "DAY_START");
         currentState = addSystemMessage(currentState, systemMessages.dayBreak);
@@ -2123,7 +2123,7 @@ export function useGameLogic() {
       if (targetSeat >= 0) {
         const boomTarget = currentState.players.find((p) => p.seat === targetSeat);
         if (boomTarget?.role === "Hunter" && currentState.roleAbilities.hunterCanShoot) {
-          await delay(1200);
+          await delay(600);
           const hunterFn = hunterDeathRef.current;
           if (hunterFn) await hunterFn(currentState, boomTarget, false);
           return;
@@ -2136,7 +2136,7 @@ export function useGameLogic() {
         return;
       }
 
-      await delay(1200);
+      await delay(600);
       await proceedToNight(currentState, token);
     }
   }, [gameState, humanPlayer, setGameState, setDialogue, setIsWaitingForAI, waitForUnpause, getToken, runNightPhaseAction, resolveNight, startDayPhaseInternal, proceedToNight, endGame, transitionPhase, speakerHost, t]);

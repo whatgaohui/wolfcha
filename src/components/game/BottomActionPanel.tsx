@@ -62,9 +62,13 @@ export function BottomActionPanel({
         {/* 选择确认 (投票/夜间行动) */}
         {(() => {
           const isRevealedIdiot = humanPlayer?.role === "Idiot" && gameState.roleAbilities.idiotRevealed;
-          const isCorrectRoleForPhase = 
+          // 警徽选举:候选人不能投票;非候选人且未投过票才能投
+          const badgeCandidates = gameState.badge.candidates || [];
+          const isBadgeCandidate = badgeCandidates.includes(humanPlayer?.seat ?? -1);
+          const hasBadgeVoted = humanPlayer ? typeof gameState.badge.votes?.[humanPlayer.playerId] === "number" : false;
+          const isCorrectRoleForPhase =
             (phase === "DAY_VOTE" && humanPlayer?.alive && !isRevealedIdiot) ||
-            (phase === "DAY_BADGE_ELECTION" && humanPlayer?.alive) ||
+            (phase === "DAY_BADGE_ELECTION" && humanPlayer?.alive && !isBadgeCandidate && !hasBadgeVoted && badgeCandidates.length > 0) ||
             (phase === "NIGHT_SEER_ACTION" && humanPlayer?.role === "Seer" && humanPlayer?.alive && gameState.nightActions.seerTarget === undefined) ||
             (phase === "NIGHT_WOLF_ACTION" && humanPlayer && isWolfRole(humanPlayer.role) && humanPlayer.alive) ||
             (phase === "NIGHT_GUARD_ACTION" && humanPlayer?.role === "Guard" && humanPlayer?.alive) ||
@@ -232,7 +236,13 @@ export function BottomActionPanel({
         {(phase === "DAY_VOTE" || phase === "DAY_BADGE_ELECTION") && humanPlayer?.alive && !isWaitingForAI && selectedSeat === null && (() => {
           const isRevealedIdiot = humanPlayer?.role === "Idiot" && gameState.roleAbilities.idiotRevealed;
           if (isRevealedIdiot) return null;
-          if (phase === "DAY_BADGE_ELECTION" && (gameState.badge.candidates || []).includes(humanPlayer.seat)) return null;
+          // 警徽选举:候选人不投票;已投过票的不显示
+          if (phase === "DAY_BADGE_ELECTION") {
+            const cands = gameState.badge.candidates || [];
+            if (cands.includes(humanPlayer.seat)) return null;
+            if (typeof gameState.badge.votes?.[humanPlayer.playerId] === "number") return null;
+            if (cands.length === 0) return null;
+          }
           return (
             <motion.div
               key="vote-abstain"
