@@ -1201,6 +1201,11 @@
       "description": "Game over",
       "villageWin": "Villagers win",
       "wolfWin": "Werewolves win"
+    },
+    "nightMagician": {
+      "description": "Magician, open your eyes. Choose a player to heal.",
+      "human": "You are the Magician. Choose a player to heal (if killed by wolves tonight, they survive).",
+      "used": "Heal already used, skip"
     }
   },
   "page": {

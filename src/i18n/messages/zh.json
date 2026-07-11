@@ -1201,6 +1201,11 @@
       "description": "游戏结束",
       "villageWin": "好人胜利",
       "wolfWin": "狼人胜利"
+    },
+    "nightMagician": {
+      "description": "奇迹商人请睁眼，选择一名玩家给药",
+      "human": "你是奇迹商人，选择一名玩家给药（若其今晚被狼杀则救活）",
+      "used": "解药已用，跳过"
     }
   },
   "page": {

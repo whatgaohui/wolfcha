@@ -918,6 +918,8 @@ export default function Home() {
         return "Witch";
       case "NIGHT_GUARD_ACTION":
         return "Guard";
+      case "NIGHT_MAGICIAN_ACTION":
+        return "Magician";
       case "HUNTER_SHOOT":
         return "Hunter";
       default:

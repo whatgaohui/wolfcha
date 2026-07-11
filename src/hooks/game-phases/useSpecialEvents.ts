@@ -200,19 +200,9 @@ export function useSpecialEvents(
       }
     };
 
-    // 奇迹商人自动救人(简化版):如果场上有存活的奇迹商人且解药未用,
-    // 且狼杀目标不是狼人(即好人),则自动给药救该人。
-    let magicianSaved = false;
-    if (wolfTarget !== undefined && !currentState.roleAbilities.magicianHealUsed) {
-      const magician = currentState.players.find((p) => p.role === "Magician" && p.alive);
-      const victim = currentState.players.find((p) => p.seat === wolfTarget);
-      if (magician && victim && !isWolfRole(victim.role)) {
-        // 奇迹商人解药救人(独立于女巫,不触发牛奶规则)
-        currentState.nightActions.magicianHealTarget = wolfTarget;
-        currentState.roleAbilities.magicianHealUsed = true;
-        magicianSaved = true;
-      }
-    }
+    // 奇迹商人救人:如果商人选了目标(magicianHealTarget)且该目标正是狼杀目标,则救活
+    const magicianHealTarget = currentState.nightActions.magicianHealTarget;
+    const magicianSaved = magicianHealTarget !== undefined && magicianHealTarget === wolfTarget;
 
     // 狼人击杀判定
     if (wolfTarget !== undefined) {

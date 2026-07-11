@@ -39,6 +39,7 @@ export type Phase =
   | "NIGHT_START"
   | "NIGHT_GUARD_ACTION"   // 守卫保护
   | "NIGHT_WOLF_ACTION"    // 狼人出刀
+  | "NIGHT_MAGICIAN_ACTION" // 奇迹商人给药
   | "NIGHT_WITCH_ACTION"   // 女巫用药
   | "NIGHT_SEER_ACTION"    // 预言家查验
   | "NIGHT_RESOLVE"

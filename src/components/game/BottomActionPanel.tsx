@@ -9,6 +9,7 @@ import {
   Eye,
   Shield,
   Crosshair,
+  Sparkle,
 } from "@phosphor-icons/react";
 import { ArrowClockwise } from "@phosphor-icons/react";
 import {
@@ -72,6 +73,7 @@ export function BottomActionPanel({
             (phase === "NIGHT_SEER_ACTION" && humanPlayer?.role === "Seer" && humanPlayer?.alive && gameState.nightActions.seerTarget === undefined) ||
             (phase === "NIGHT_WOLF_ACTION" && humanPlayer && isWolfRole(humanPlayer.role) && humanPlayer.alive) ||
             (phase === "NIGHT_GUARD_ACTION" && humanPlayer?.role === "Guard" && humanPlayer?.alive) ||
+            (phase === "NIGHT_MAGICIAN_ACTION" && humanPlayer?.role === "Magician" && humanPlayer?.alive && !gameState.roleAbilities.magicianHealUsed) ||
             (phase === "HUNTER_SHOOT" && humanPlayer?.role === "Hunter") ||
             (phase === "WHITE_WOLF_KING_BOOM" && humanPlayer?.role === "WhiteWolfKing");
 
@@ -124,6 +126,13 @@ export function BottomActionPanel({
                   <button onClick={onConfirmAction} className="inline-flex items-center justify-center h-10 text-base font-medium rounded-sm border-none cursor-pointer active:scale-[0.98] transition-all duration-150 bg-[var(--color-success)] text-white hover:bg-[#059669] flex-[2]">
                     <Shield size={18} weight="fill" className="mr-1" />
                     {t("bottomAction.confirmGuard", { seat: selectedSeat + 1 })}
+                  </button>
+                )}
+
+                {phase === "NIGHT_MAGICIAN_ACTION" && (
+                  <button onClick={onConfirmAction} className="inline-flex items-center justify-center h-10 text-base font-medium rounded-sm border-none cursor-pointer active:scale-[0.98] transition-all duration-150 bg-purple-600 text-white hover:bg-purple-500 flex-[2]">
+                    <Sparkle size={18} weight="fill" className="mr-1" />
+                    给 {selectedSeat + 1}号 发药
                   </button>
                 )}
 

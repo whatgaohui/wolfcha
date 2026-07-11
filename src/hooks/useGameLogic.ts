@@ -359,7 +359,7 @@ export function useGameLogic() {
   );
 
   const runNightPhaseAction = useCallback(
-    async (state: GameState, token: ReturnType<typeof getToken>, action: "START_NIGHT" | "CONTINUE_NIGHT_AFTER_GUARD" | "CONTINUE_NIGHT_AFTER_WOLF" | "CONTINUE_NIGHT_AFTER_WITCH") => {
+    async (state: GameState, token: ReturnType<typeof getToken>, action: "START_NIGHT" | "CONTINUE_NIGHT_AFTER_GUARD" | "CONTINUE_NIGHT_AFTER_WOLF" | "CONTINUE_NIGHT_AFTER_MAGICIAN" | "CONTINUE_NIGHT_AFTER_WITCH") => {
       const phaseImpl = phaseManagerRef.current.getPhase("NIGHT_START");
       if (!phaseImpl) return;
       await phaseImpl.handleAction(
@@ -1966,6 +1966,25 @@ export function useGameLogic() {
       await delay(800);
       await waitForUnpause();
       await runNightPhaseAction(currentState, token, "CONTINUE_NIGHT_AFTER_WOLF");
+    }
+    // 奇迹商人给药
+    else if (gameState.phase === "NIGHT_MAGICIAN_ACTION" && humanPlayer.role === "Magician") {
+      if (currentState.roleAbilities.magicianHealUsed) {
+        toast.error("解药已用");
+        return;
+      }
+      const targetPlayer = currentState.players.find((p) => p.seat === targetSeat);
+      currentState = {
+        ...currentState,
+        nightActions: { ...currentState.nightActions, magicianHealTarget: targetSeat },
+        roleAbilities: { ...currentState.roleAbilities, magicianHealUsed: true },
+      };
+      setDialogue(t("speakers.system"), `你给 ${targetSeat + 1}号 ${targetPlayer?.displayName || ""} 发了解药，若其今晚被狼杀则救活`, false);
+      setGameState(currentState);
+
+      await delay(800);
+      await waitForUnpause();
+      await runNightPhaseAction(currentState, token, "CONTINUE_NIGHT_AFTER_MAGICIAN");
     }
     // 女巫用药
     else if (gameState.phase === "NIGHT_WITCH_ACTION" && humanPlayer.role === "Witch") {

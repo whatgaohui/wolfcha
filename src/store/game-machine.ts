@@ -91,6 +91,14 @@ function isPhaseActionCompleted(state: GameState): boolean {
       return state.nightActions.wolfTarget !== undefined;
     }
 
+    case "NIGHT_MAGICIAN_ACTION": {
+      const magician = state.players.find((p) => p.role === "Magician" && p.alive);
+      // 没有商人,或药已用,或已选择目标 -> 稳定
+      if (!magician) return true;
+      if (state.roleAbilities.magicianHealUsed) return true;
+      return state.nightActions.magicianHealTarget !== undefined;
+    }
+
     case "NIGHT_WITCH_ACTION": {
       const witch = state.players.find((p) => p.role === "Witch" && p.alive);
       if (!witch) return true;
@@ -180,8 +188,17 @@ export function getRestorePhase(state: GameState): Phase {
         return "NIGHT_GUARD_ACTION";
       }
       return "NIGHT_START";
+    case "NIGHT_MAGICIAN_ACTION":
+      // 商人阶段回退:如果狼人已选,回到狼人阶段
+      if (state.nightActions.wolfTarget !== undefined) {
+        return "NIGHT_WOLF_ACTION";
+      }
+      return "NIGHT_START";
     case "NIGHT_WITCH_ACTION":
-      // 如果狼人已选，回到狼人选完后的状态
+      // 如果商人已选,回到商人阶段;否则如果狼人已选,回到狼人阶段
+      if (state.nightActions.magicianHealTarget !== undefined || state.roleAbilities.magicianHealUsed) {
+        return "NIGHT_MAGICIAN_ACTION";
+      }
       if (state.nightActions.wolfTarget !== undefined) {
         return "NIGHT_WOLF_ACTION";
       }
@@ -639,6 +656,28 @@ export const PHASE_CONFIGS: Record<Phase, PhaseConfig> = {
     },
     actionType: "night_action",
   },
+  NIGHT_MAGICIAN_ACTION: {
+    phase: "NIGHT_MAGICIAN_ACTION",
+    description: "phase.nightMagician.description",
+    humanDescription: (hp, gs) => {
+      const { t } = getI18n();
+      if (hp?.role !== "Magician") return t("phase.nightMagician.description");
+      if (gs.roleAbilities.magicianHealUsed) return t("phase.nightMagician.used");
+      return t("phase.nightMagician.human");
+    },
+    requiresHumanInput: (hp, gs) => {
+      if (!hp?.alive || hp?.role !== "Magician") return false;
+      return !gs.roleAbilities.magicianHealUsed;
+    },
+    canSelectPlayer: (hp, target, gs) => {
+      if (!hp || hp.role !== "Magician" || !target.alive) return false;
+      if (gs.roleAbilities.magicianHealUsed) return false;
+      // 不能给自己给药
+      if (target.isHuman) return false;
+      return true;
+    },
+    actionType: "night_action",
+  },
   NIGHT_WITCH_ACTION: {
     phase: "NIGHT_WITCH_ACTION",
     description: "phase.nightWitch.description",
@@ -1006,10 +1045,11 @@ export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {
   LOBBY: ["SETUP"],
   SETUP: ["NIGHT_START"],
   
-  // 夜晚流程: 守卫 -> 狼人 -> 女巫 -> 预言家 -> 结算
+  // 夜晚流程: 守卫 -> 狼人 -> 奇迹商人 -> 女巫 -> 预言家 -> 结算
   NIGHT_START: ["NIGHT_GUARD_ACTION", "NIGHT_WOLF_ACTION"],
   NIGHT_GUARD_ACTION: ["NIGHT_WOLF_ACTION"],
-  NIGHT_WOLF_ACTION: ["NIGHT_WITCH_ACTION"],
+  NIGHT_WOLF_ACTION: ["NIGHT_MAGICIAN_ACTION", "NIGHT_WITCH_ACTION"],
+  NIGHT_MAGICIAN_ACTION: ["NIGHT_WITCH_ACTION"],
   NIGHT_WITCH_ACTION: ["NIGHT_SEER_ACTION"],
   NIGHT_SEER_ACTION: ["NIGHT_RESOLVE"],
   NIGHT_RESOLVE: ["DAY_START", "HUNTER_SHOOT", "BADGE_TRANSFER", "GAME_END"],
@@ -1121,6 +1161,7 @@ export function getNextNightPhase(currentPhase: Phase, gameState: GameState): Ph
   const roleForPhase: Record<string, Role> = {
     NIGHT_GUARD_ACTION: "Guard",
     NIGHT_WOLF_ACTION: "Werewolf",
+    NIGHT_MAGICIAN_ACTION: "Magician",
     NIGHT_WITCH_ACTION: "Witch",
     NIGHT_SEER_ACTION: "Seer",
   };
