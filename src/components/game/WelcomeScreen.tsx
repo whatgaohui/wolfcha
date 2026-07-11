@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   PawPrint,
   Sparkle,
@@ -59,14 +59,30 @@ const DIFFICULTY_OPTIONS: { value: DifficultyLevel; descKey: string }[] = [
   { value: "hard", descKey: "hardDesc" },
 ];
 
-const ROLE_OPTIONS: { value: Role; Icon: PhosphorIcon; color: string }[] = [
-  { value: "Villager", Icon: Users, color: "text-amber-700" },
-  { value: "Werewolf", Icon: WerewolfIcon, color: "text-red-700" },
-  { value: "Seer", Icon: Eye, color: "text-indigo-700" },
-  { value: "Witch", Icon: Drop, color: "text-emerald-700" },
-  { value: "Hunter", Icon: Crosshair, color: "text-orange-700" },
-  { value: "Guard", Icon: Shield, color: "text-sky-700" },
-];
+// 各人数板子可用的角色偏好选项(与 getRoleConfiguration 对应)
+const ROLES_BY_PLAYER_COUNT: Record<number, Role[]> = {
+  6: ["Villager", "Werewolf", "Seer", "Witch"],
+  9: ["Villager", "Werewolf", "WhiteWolfKing", "Seer", "Witch", "Hunter"],
+  10: ["Villager", "Werewolf", "WhiteWolfKing", "Magician", "Seer", "Witch"],
+  12: ["Villager", "Werewolf", "WhiteWolfKing", "Seer", "Witch", "Hunter", "Guard"],
+};
+
+const ROLE_META: Record<Role, { Icon: PhosphorIcon; color: string }> = {
+  Villager: { Icon: Users, color: "text-amber-700" },
+  Werewolf: { Icon: WerewolfIcon, color: "text-red-700" },
+  WhiteWolfKing: { Icon: WerewolfIcon, color: "text-red-800" },
+  Seer: { Icon: Eye, color: "text-indigo-700" },
+  Witch: { Icon: Drop, color: "text-emerald-700" },
+  Hunter: { Icon: Crosshair, color: "text-orange-700" },
+  Guard: { Icon: Shield, color: "text-sky-700" },
+  Idiot: { Icon: Users, color: "text-teal-700" },
+  Magician: { Icon: Sparkle, color: "text-purple-700" },
+};
+
+function getRoleOptions(playerCount: number): { value: Role; Icon: PhosphorIcon; color: string }[] {
+  const roles = ROLES_BY_PLAYER_COUNT[playerCount] ?? ROLES_BY_PLAYER_COUNT[9];
+  return roles.map((r) => ({ value: r, Icon: ROLE_META[r].Icon, color: ROLE_META[r].color }));
+}
 
 export function WelcomeScreen({
   humanName,
@@ -92,6 +108,14 @@ export function WelcomeScreen({
   const [difficulty, setDifficulty] = useAtom(difficultyAtom);
   const [preferredRole, setPreferredRole] = useAtom(preferredRoleAtom);
   const [showSetup, setShowSetup] = useState(false);
+
+  // 切换人数时,如果当前 preferredRole 不在新板子的可用角色里,重置为随机
+  useEffect(() => {
+    const available = ROLES_BY_PLAYER_COUNT[playerCount] ?? ROLES_BY_PLAYER_COUNT[9];
+    if (preferredRole && !available.includes(preferredRole)) {
+      setPreferredRole("");
+    }
+  }, [playerCount, preferredRole, setPreferredRole]);
 
   const handleStart = () => {
     onStart({
@@ -256,7 +280,7 @@ export function WelcomeScreen({
               >
                 {locale === "zh" ? "随机" : "Random"}
               </button>
-              {ROLE_OPTIONS.map(({ value, Icon, color }) => {
+              {getRoleOptions(playerCount).map(({ value, Icon, color }) => {
                 const active = preferredRole === value;
                 return (
                   <button
@@ -270,7 +294,7 @@ export function WelcomeScreen({
                     }`}
                   >
                     <Icon weight="fill" className={`h-3.5 w-3.5 ${active ? "text-amber-300" : color}`} />
-                    {t(`roles.${value.toLowerCase()}`)}
+                    {t(`roles.${value.charAt(0).toLowerCase() + value.slice(1)}`)}
                   </button>
                 );
               })}
