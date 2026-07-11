@@ -618,8 +618,8 @@ export async function generateCharacters(
     const emittedBaseProfiles: BaseProfile[] = [];
     let accumulatedContent = "";
 
-    // 精简字段后每角色约 400 tokens
-    const fullMaxTokens = Math.max(3500, count * 450 + 600);
+    // 每角色约 600 tokens(含 JSON 结构开销),确保不被截断
+    const fullMaxTokens = Math.max(4000, count * 650 + 800);
 
     const stream = generateCompletionStream({
       model: getGeneratorModel(),
@@ -701,39 +701,74 @@ export async function generateCharacters(
       // 回退到完整解析
       const cleaned = stripMarkdownCodeFences(accumulatedContent);
       const fullResult = parseLLMJson<unknown>(cleaned);
-      if (!fullResult) {
-        throw new Error("Character generation returned invalid JSON");
+
+      if (fullResult) {
+        const normalized = normalizeGeneratedCharacters(fullResult);
+        const chars = normalized.characters;
+
+        // 补充未生成的角色（合并模式下无 baseProfiles，直接用生成结果）
+        for (let i = 0; i < chars.length; i++) {
+          if (finalizedCharacters[i]) continue;
+
+          const c = chars[i];
+          if (!c?.persona) continue;
+
+          const voiceId = resolveVoiceId(
+            c.persona.voiceId,
+            c.persona.gender,
+            c.persona.age,
+            "zh" as AppLocale
+          );
+
+          const character: GeneratedCharacter = {
+            displayName: c.displayName,
+            persona: {
+              ...c.persona,
+              voiceId,
+              relationships: undefined,
+            },
+            playerMind: c.playerMind,
+          };
+
+          finalizedCharacters[i] = character;
+          options?.onCharacter?.(i, character);
+        }
       }
+      // 如果完整解析也失败,但流式已解析出至少一半角色,用已解析的(不抛错)
+      // 这样即使 LLM 输出被截断,游戏也能用已有角色继续
+    }
 
-      const normalized = normalizeGeneratedCharacters(fullResult);
-      const chars = normalized.characters;
-
-      // 补充未生成的角色（合并模式下无 baseProfiles，直接用生成结果）
-      for (let i = 0; i < chars.length; i++) {
-        if (finalizedCharacters[i]) continue;
-
-        const c = chars[i];
-        if (!c?.persona) continue;
-
-        const voiceId = resolveVoiceId(
-          c.persona.voiceId,
-          c.persona.gender,
-          c.persona.age,
-          "zh" as AppLocale
-        );
-
-        const character: GeneratedCharacter = {
-          displayName: c.displayName,
-          persona: {
-            ...c.persona,
-            voiceId,
-            relationships: undefined,
-          },
-          playerMind: c.playerMind,
-        };
-
-        finalizedCharacters[i] = character;
-        options?.onCharacter?.(i, character);
+    // 最终检查:如果连一半角色都没有,才算真正失败
+    const finalCount = finalizedCharacters.filter(Boolean).length;
+    if (finalCount === 0) {
+      throw new Error("Character generation returned invalid JSON");
+    }
+    // 不足 count 的部分用占位角色补齐,避免 setupPlayers 出错
+    if (finalCount < count) {
+      console.warn(`[character-gen] Only ${finalCount}/${count} characters generated, filling rest with placeholders`);
+      for (let i = 0; i < count; i++) {
+        if (!finalizedCharacters[i]) {
+          const placeholder: GeneratedCharacter = {
+            displayName: `玩家${i + 1}`,
+            persona: {
+              voiceRules: ["普通"],
+              mbti: "ISTJ",
+              gender: "male",
+              age: 30,
+              werewolfExperience: "普通玩家",
+              vocabularyStyle: "日常用语",
+              reasoningStyle: "凭直觉",
+              wolfDeceptionStyle: "装好人",
+            },
+            playerMind: {
+              courage: "中等",
+              suspicionThreshold: "需要证据",
+              selfProtection: "解释辩解",
+            },
+          };
+          finalizedCharacters[i] = placeholder;
+          options?.onCharacter?.(i, placeholder);
+        }
       }
     }
 
