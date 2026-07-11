@@ -82,7 +82,7 @@ export const playerCountAtom = atom(
 );
 
 // Preferred role setting (empty string means random)
-const ALL_ROLES: Role[] = ["Villager", "Werewolf", "WhiteWolfKing", "Seer", "Witch", "Hunter", "Guard", "Idiot"];
+const ALL_ROLES: Role[] = ["Villager", "Werewolf", "WhiteWolfKing", "Seer", "Witch", "Hunter", "Guard", "Idiot", "Magician"];
 
 const normalizePreferredRole = (value: string): Role | "" =>
   ALL_ROLES.includes(value as Role) ? (value as Role) : "";
