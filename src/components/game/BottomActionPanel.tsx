@@ -132,7 +132,7 @@ export function BottomActionPanel({
                 {phase === "NIGHT_MAGICIAN_ACTION" && (
                   <button onClick={onConfirmAction} className="inline-flex items-center justify-center h-10 text-base font-medium rounded-sm border-none cursor-pointer active:scale-[0.98] transition-all duration-150 bg-purple-600 text-white hover:bg-purple-500 flex-[2]">
                     <Sparkle size={18} weight="fill" className="mr-1" />
-                    给 {selectedSeat + 1}号 发药
+                    选 {selectedSeat + 1}号 为幸运儿
                   </button>
                 )}
 

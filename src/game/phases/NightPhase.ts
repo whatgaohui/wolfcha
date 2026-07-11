@@ -249,11 +249,10 @@ export class NightPhase extends GamePhase {
   private async runMagicianAction(state: GameState, runtime: NightPhaseRuntime): Promise<GameState> {
     const { t } = getI18n();
     const speakerSystem = t("speakers.system");
-    const systemMessages = getSystemMessages();
     const magician = state.players.find((p) => p.role === "Magician" && p.alive);
 
     let currentState = this.transitionPhase(state, "NIGHT_MAGICIAN_ACTION");
-    currentState = addSystemMessage(currentState, "奇迹商人请睁眼,选择一名玩家给药");
+    currentState = addSystemMessage(currentState, "奇迹商人请睁眼,选择一名玩家成为幸运儿");
     runtime.setGameState(currentState);
 
     runtime.setIsWaitingForAI(true);
@@ -267,7 +266,7 @@ export class NightPhase extends GamePhase {
       return currentState;
     }
 
-    // 药已用,直接跳过
+    // 技能已用,直接跳过
     if (currentState.roleAbilities.magicianHealUsed) {
       runtime.setIsWaitingForAI(false);
       return currentState;
@@ -275,22 +274,28 @@ export class NightPhase extends GamePhase {
 
     if (magician.isHuman) {
       runtime.setIsWaitingForAI(false);
-      runtime.setDialogue(speakerSystem, "请选择一名玩家给药(若其今晚被狼杀则救活)", false);
+      runtime.setDialogue(speakerSystem, "请选择一名玩家成为幸运儿(随机获得查验/毒药/守护其一;若其为狼人则你次日死亡)", false);
       return currentState;
     }
 
-    // AI 奇迹商人:随机选一个非自己的存活好人给药
-    const candidates = currentState.players.filter(
-      (p) => p.alive && !p.isHuman && !isWolfRole(p.role)
-    );
+    // AI 奇迹商人:随机选一个非自己的存活玩家
+    const candidates = currentState.players.filter((p) => p.alive && p.seat !== magician.seat);
     const target = candidates[Math.floor(Math.random() * candidates.length)];
     await runtime.waitForUnpause();
     if (!runtime.isTokenValid(runtime.token)) return currentState;
 
     if (target) {
+      // 随机分配技能:查验/毒药/守护
+      const skills = ["seer", "witch_poison", "guard"] as const;
+      const grantedSkill = skills[Math.floor(Math.random() * skills.length)];
       currentState = {
         ...currentState,
-        nightActions: { ...currentState.nightActions, magicianHealTarget: target.seat },
+        nightActions: {
+          ...currentState.nightActions,
+          magicianHealTarget: target.seat,
+          magicianGrantedSkill: grantedSkill,
+          luckyPlayerId: target.playerId,
+        },
         roleAbilities: { ...currentState.roleAbilities, magicianHealUsed: true },
       };
     }
@@ -419,6 +424,22 @@ export class NightPhase extends GamePhase {
   private async runNightPhase(state: GameState, runtime: NightPhaseRuntime): Promise<void> {
     let currentState = state;
 
+    // 奇迹商人(夜晚第一个行动)
+    const hasMagician = currentState.players.some((p) => p.role === "Magician" && p.alive);
+    if (hasMagician) {
+      currentState = await this.runMagicianAction(currentState, runtime);
+      if (!runtime.isTokenValid(runtime.token)) return;
+
+      const magician = currentState.players.find((p) => p.role === "Magician" && p.alive);
+      if (magician?.isHuman && !currentState.roleAbilities.magicianHealUsed && currentState.nightActions.magicianHealTarget === undefined) {
+        return; // 等待人类商人操作
+      }
+
+      await delay(DELAY_CONFIG.NIGHT_PHASE_GAP);
+      await runtime.waitForUnpause();
+      if (!runtime.isTokenValid(runtime.token)) return;
+    }
+
     const hasGuard = currentState.players.some((p) => p.role === "Guard");
     if (hasGuard) {
       currentState = await this.runGuardAction(currentState, runtime);
@@ -494,23 +515,7 @@ export class NightPhase extends GamePhase {
   }
 
   private async continueNightAfterWolf(state: GameState, runtime: NightPhaseRuntime): Promise<void> {
-    // 奇迹商人阶段(在狼人之后、女巫之前)
-    const currentState = await this.runMagicianAction(state, runtime);
-    if (!runtime.isTokenValid(runtime.token)) return;
-
-    const magician = currentState.players.find((p) => p.role === "Magician" && p.alive);
-    if (magician?.isHuman && !currentState.roleAbilities.magicianHealUsed && currentState.nightActions.magicianHealTarget === undefined) {
-      return; // 等待人类商人操作
-    }
-
-    await delay(DELAY_CONFIG.NIGHT_PHASE_GAP);
-    await runtime.waitForUnpause();
-    if (!runtime.isTokenValid(runtime.token)) return;
-
-    await this.continueNightAfterMagician(currentState, runtime);
-  }
-
-  private async continueNightAfterMagician(state: GameState, runtime: NightPhaseRuntime): Promise<void> {
+    // 奇迹商人在夜晚最开始已行动,这里直接进入女巫阶段
     const currentState = await this.runWitchAction(state, runtime);
     if (!runtime.isTokenValid(runtime.token)) return;
 
@@ -528,6 +533,23 @@ export class NightPhase extends GamePhase {
     if (!runtime.isTokenValid(runtime.token)) return;
 
     await this.continueNightAfterWitch(currentState, runtime);
+  }
+
+  private async continueNightAfterMagician(state: GameState, runtime: NightPhaseRuntime): Promise<void> {
+    // 商人之后进入守卫阶段(恢复时用)
+    const currentState = await this.runGuardAction(state, runtime);
+    if (!runtime.isTokenValid(runtime.token)) return;
+
+    const guard = currentState.players.find((p) => p.role === "Guard" && p.alive);
+    if (guard?.isHuman && currentState.nightActions.guardTarget === undefined) {
+      return;
+    }
+
+    await delay(DELAY_CONFIG.NIGHT_PHASE_GAP);
+    await runtime.waitForUnpause();
+    if (!runtime.isTokenValid(runtime.token)) return;
+
+    await this.continueNightAfterGuard(currentState, runtime);
   }
 
   private async continueNightAfterWitch(state: GameState, runtime: NightPhaseRuntime): Promise<void> {

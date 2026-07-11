@@ -200,14 +200,29 @@ export function useSpecialEvents(
       }
     };
 
-    // 奇迹商人救人:如果商人选了目标(magicianHealTarget)且该目标正是狼杀目标,则救活
-    const magicianHealTarget = currentState.nightActions.magicianHealTarget;
-    const magicianSaved = magicianHealTarget !== undefined && magicianHealTarget === wolfTarget;
+    // 奇迹商人规则:如果幸运儿是狼人,则幸运儿不获得技能,且次日奇迹商人死亡
+    const luckyPlayerId = currentState.nightActions.luckyPlayerId;
+    let magicianDiesNextDay = false;
+    if (luckyPlayerId) {
+      const luckyPlayer = currentState.players.find((p) => p.playerId === luckyPlayerId);
+      if (luckyPlayer && isWolfRole(luckyPlayer.role)) {
+        // 幸运儿是狼人 -> 商人次日死亡
+        magicianDiesNextDay = true;
+      }
+    }
+
+    // 如果商人次日要死,加到死亡列表
+    if (magicianDiesNextDay) {
+      const magician = currentState.players.find((p) => p.role === "Magician" && p.alive);
+      if (magician) {
+        addNightDeath(magician.seat, "wolf"); // 用 wolf reason 表示死亡
+      }
+    }
 
     // 狼人击杀判定
     if (wolfTarget !== undefined) {
       const isProtected = guardTarget === wolfTarget;
-      const isSaved = witchSave === true || magicianSaved;
+      const isSaved = witchSave === true;
 
       // If both guard and witch save are applied, the victim still dies (milk/guard overlap).
       if ((isProtected && isSaved) || (!isProtected && !isSaved)) {

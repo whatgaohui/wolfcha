@@ -672,8 +672,8 @@ export const PHASE_CONFIGS: Record<Phase, PhaseConfig> = {
     canSelectPlayer: (hp, target, gs) => {
       if (!hp || hp.role !== "Magician" || !target.alive) return false;
       if (gs.roleAbilities.magicianHealUsed) return false;
-      // 不能给自己给药
-      if (target.isHuman) return false;
+      // 不能选自己
+      if (target.seat === hp.seat) return false;
       return true;
     },
     actionType: "night_action",
@@ -1045,11 +1045,11 @@ export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {
   LOBBY: ["SETUP"],
   SETUP: ["NIGHT_START"],
   
-  // 夜晚流程: 守卫 -> 狼人 -> 奇迹商人 -> 女巫 -> 预言家 -> 结算
-  NIGHT_START: ["NIGHT_GUARD_ACTION", "NIGHT_WOLF_ACTION"],
+  // 夜晚流程: 奇迹商人(第一个) -> 守卫 -> 狼人 -> 女巫 -> 预言家 -> 结算
+  NIGHT_START: ["NIGHT_MAGICIAN_ACTION", "NIGHT_GUARD_ACTION", "NIGHT_WOLF_ACTION"],
+  NIGHT_MAGICIAN_ACTION: ["NIGHT_GUARD_ACTION"],
   NIGHT_GUARD_ACTION: ["NIGHT_WOLF_ACTION"],
-  NIGHT_WOLF_ACTION: ["NIGHT_MAGICIAN_ACTION", "NIGHT_WITCH_ACTION"],
-  NIGHT_MAGICIAN_ACTION: ["NIGHT_WITCH_ACTION"],
+  NIGHT_WOLF_ACTION: ["NIGHT_WITCH_ACTION"],
   NIGHT_WITCH_ACTION: ["NIGHT_SEER_ACTION"],
   NIGHT_SEER_ACTION: ["NIGHT_RESOLVE"],
   NIGHT_RESOLVE: ["DAY_START", "HUNTER_SHOOT", "BADGE_TRANSFER", "GAME_END"],

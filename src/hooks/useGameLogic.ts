@@ -1967,19 +1967,28 @@ export function useGameLogic() {
       await waitForUnpause();
       await runNightPhaseAction(currentState, token, "CONTINUE_NIGHT_AFTER_WOLF");
     }
-    // 奇迹商人给药
+    // 奇迹商人选幸运儿
     else if (gameState.phase === "NIGHT_MAGICIAN_ACTION" && humanPlayer.role === "Magician") {
       if (currentState.roleAbilities.magicianHealUsed) {
-        toast.error("解药已用");
+        toast.error("技能已用");
         return;
       }
       const targetPlayer = currentState.players.find((p) => p.seat === targetSeat);
+      // 随机分配技能:查验/毒药/守护
+      const skills = ["seer", "witch_poison", "guard"] as const;
+      const grantedSkill = skills[Math.floor(Math.random() * skills.length)];
+      const skillName = grantedSkill === "seer" ? "查验" : grantedSkill === "witch_poison" ? "毒药" : "守护";
       currentState = {
         ...currentState,
-        nightActions: { ...currentState.nightActions, magicianHealTarget: targetSeat },
+        nightActions: {
+          ...currentState.nightActions,
+          magicianHealTarget: targetSeat,
+          magicianGrantedSkill: grantedSkill,
+          luckyPlayerId: targetPlayer?.playerId,
+        },
         roleAbilities: { ...currentState.roleAbilities, magicianHealUsed: true },
       };
-      setDialogue(t("speakers.system"), `你给 ${targetSeat + 1}号 ${targetPlayer?.displayName || ""} 发了解药，若其今晚被狼杀则救活`, false);
+      setDialogue(t("speakers.system"), `你选择 ${targetSeat + 1}号 ${targetPlayer?.displayName || ""} 为幸运儿,获得技能: ${skillName}(若其为狼人则你次日死亡)`, false);
       setGameState(currentState);
 
       await delay(800);

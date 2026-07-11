@@ -230,7 +230,9 @@ export interface GameState {
     seerHistory?: Array<{ targetSeat: number; isWolf: boolean; day: number }>; // 查验历史
     pendingWolfVictim?: number;  // 待公布的狼人击杀目标（警长竞选后公布）
     pendingPoisonVictim?: number; // 待公布的女巫毒杀目标（警长竞选后公布）
-    magicianHealTarget?: number; // 奇迹商人给药目标（简化版:自动给好人）
+    magicianHealTarget?: number; // 奇迹商人选择的幸运儿座位
+    magicianGrantedSkill?: "seer" | "witch_poison" | "guard"; // 幸运儿获得的技能
+    luckyPlayerId?: string; // 幸运儿的 playerId(用于次晨判定)
   };
   // 角色能力使用记录
   roleAbilities: {
