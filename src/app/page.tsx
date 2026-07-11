@@ -41,6 +41,8 @@ import { BADGE_TRANSFER_TORN } from "@/lib/game-master";
 // Components
 import { WelcomeScreen } from "@/components/game/WelcomeScreen";
 import { PlayerCardCompact } from "@/components/game/PlayerCardCompact";
+import { MarkMenu } from "@/components/game/MarkMenu";
+import { usePlayerMarks } from "@/lib/player-marks";
 import { DialogArea } from "@/components/game/DialogArea";
 import { BottomActionPanel } from "@/components/game/BottomActionPanel";
 import { Notebook } from "@/components/game/Notebook";
@@ -532,6 +534,8 @@ export default function Home() {
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [isNotebookOpen, setIsNotebookOpen] = useState(false);
   const [isAIAssistOpen, setIsAIAssistOpen] = useState(false);
+  const [markMenuSeat, setMarkMenuSeat] = useState<number | null>(null);
+  const { getMark, setMark } = usePlayerMarks(gameState.gameId);
   const [isEventLogOpen, setIsEventLogOpen] = useState(false);
   const [isDevConsoleOpen, setIsDevConsoleOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -1573,6 +1577,8 @@ export default function Home() {
                             showModel={gameState.phase === "GAME_END"}
                             selectionTone={selectionTone}
                             isInSelectionPhase={isSelectionPhase}
+                            mark={getMark(player.seat)}
+                            onMarkClick={() => setMarkMenuSeat(player.seat)}
                           />
                         );
                       })}
@@ -1685,6 +1691,8 @@ export default function Home() {
                             showModel={gameState.phase === "GAME_END"}
                             selectionTone={selectionTone}
                             isInSelectionPhase={isSelectionPhase}
+                            mark={getMark(player.seat)}
+                            onMarkClick={() => setMarkMenuSeat(player.seat)}
                           />
                         );
                       })}
@@ -1736,6 +1744,21 @@ export default function Home() {
           gameState={gameState}
           humanPlayer={humanPlayer ?? null}
           humanName={humanName}
+        />
+      )}
+
+      {/* 玩家标记菜单 */}
+      {showTable && markMenuSeat !== null && (
+        <MarkMenu
+          isOpen={markMenuSeat !== null}
+          seat={markMenuSeat}
+          playerName={gameState.players.find((p) => p.seat === markMenuSeat)?.displayName || ""}
+          currentMark={getMark(markMenuSeat)}
+          onSelect={(m) => {
+            setMark(markMenuSeat, m);
+            setMarkMenuSeat(null);
+          }}
+          onClose={() => setMarkMenuSeat(null)}
         />
       )}
 

@@ -8,6 +8,7 @@ import { isWolfRole } from "@/types/game";
 import { cn } from "@/lib/utils";
 import { buildSimpleAvatarUrl, getModelLogoUrl } from "@/lib/avatar-config";
 import { useTranslations } from "next-intl";
+import { getMarkDef, type PlayerMark } from "@/lib/player-marks";
 
 interface PlayerCardCompactProps {
   player: Player;
@@ -29,6 +30,8 @@ interface PlayerCardCompactProps {
   isBadgeCandidate?: boolean;
   variant?: "default" | "mobile";
   isInSelectionPhase?: boolean;
+  mark?: PlayerMark;
+  onMarkClick?: () => void;
 }
 
 export function PlayerCardCompact({
@@ -51,6 +54,8 @@ export function PlayerCardCompact({
   isBadgeCandidate = false,
   variant = "default",
   isInSelectionPhase = false,
+  mark,
+  onMarkClick,
 }: PlayerCardCompactProps) {
   const t = useTranslations();
   const isDead = !player.alive;
@@ -148,6 +153,15 @@ export function PlayerCardCompact({
     }
   };
 
+  // 右键打开标记菜单
+  const handleContextMenu = (e: React.MouseEvent) => {
+    if (!isReady) return;
+    if (onMarkClick) {
+      e.preventDefault();
+      onMarkClick();
+    }
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 10, scale: 0.95 }}
@@ -174,6 +188,7 @@ export function PlayerCardCompact({
       whileHover={variant === "mobile" ? {} : {}}
       whileTap={isReady ? { scale: 0.98 } : {}}
       onClick={handleClick}
+      onContextMenu={handleContextMenu}
       className={cn(
         "wc-player-card relative group transition-all duration-300",
         variant === "mobile" && "wc-player-card--mobile",
@@ -375,6 +390,31 @@ export function PlayerCardCompact({
             </div>
           </>
         )}
+
+        {/* 玩家标记徽章 */}
+        {mark && (() => {
+          const def = getMarkDef(mark);
+          if (!def) return null;
+          return (
+            <div className="relative z-10 mt-1 flex justify-center">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onMarkClick?.();
+                }}
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-[10px] font-bold shadow-sm transition-all hover:scale-110",
+                  def.color,
+                  def.text
+                )}
+                type="button"
+                title={`标记: ${def.label}(点击修改)`}
+              >
+                {def.short}
+              </button>
+            </div>
+          );
+        })()}
 
         <div className="wc-player-card__meta min-h-[1.25rem] space-y-0.5">
           {isReady && basicInfoLabel && (
