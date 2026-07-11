@@ -3,55 +3,91 @@
 import { atomWithStorage } from "jotai/utils";
 import { useAtomValue, useSetAtom } from "jotai";
 import { useCallback } from "react";
-// atom not needed, using atomWithStorage only
 
 /**
- * 玩家标记类型 — 涵盖狼人杀常见身份/状态标记
+ * 玩家标记类型
+ * - 预设角色标记(狼人/预言家等)
+ * - 状态标记(金水/银水/好人)
+ * - 自定义文本标记(custom_ 前缀)
  */
-export type PlayerMark =
-  | "gold"      // 金水 — 预言家查验的好人
-  | "kill"      // 查杀 — 预言家查验的狼人
-  | "silver"    // 银水 — 女巫救过的人
-  | "iron_wolf" // 铁狼 — 身份坐实为狼人
-  | "iron_good" // 铁好人 — 身份坐实为好人
-  | "clear_wolf"// 明狼 — 明确是狼人
-  | "sus_wolf"  // 疑狼 — 怀疑是狼人
-  | "sus_god"   // 疑神 — 怀疑是神职
-  | "claim_god" // 跳神 — 跳了神职身份
-  | "villager"  // 平民 — 认为是平民
-  | "wolf_pit"  // 狼坑 — 在狼坑里
-  | "boom_wolf"; // 暴狼 — 暴狼(自爆或被抓)
+export type PresetMark =
+  | "wolf"       // 狼人
+  | "white_wolf" // 白狼王
+  | "seer"       // 预言家
+  | "witch"      // 女巫
+  | "hunter"     // 猎人
+  | "guard"      // 守卫
+  | "magician"   // 奇迹商人
+  | "villager"   // 平民
+  | "gold"       // 金水
+  | "silver"     // 银水
+  | "good";      // 好人
+
+/** 自定义标记用 custom:xxx 格式存储 */
+export type PlayerMark = PresetMark | string;
 
 export interface MarkMeta {
-  key: PlayerMark;
+  key: string;
   label: string;
   color: string;   // tailwind bg class
   text: string;    // tailwind text class
-  short: string;   // 短标签(2字)
+  short: string;   // 短标签
 }
 
-/** 所有标记定义(颜色参考狼人杀常见 UI) */
+/** 预设标记定义 */
 export const MARK_DEFS: MarkMeta[] = [
-  { key: "gold",       label: "金水",   color: "bg-amber-500",   text: "text-white",   short: "金水" },
-  { key: "kill",       label: "查杀",   color: "bg-red-600",     text: "text-white",   short: "查杀" },
-  { key: "silver",     label: "银水",   color: "bg-sky-400",     text: "text-white",   short: "银水" },
-  { key: "iron_wolf",  label: "铁狼",   color: "bg-red-800",     text: "text-white",   short: "铁狼" },
-  { key: "iron_good",  label: "铁好人", color: "bg-emerald-600", text: "text-white",   short: "铁好" },
-  { key: "clear_wolf", label: "明狼",   color: "bg-red-700",     text: "text-white",   short: "明狼" },
-  { key: "sus_wolf",   label: "疑狼",   color: "bg-orange-500",  text: "text-white",   short: "疑狼" },
-  { key: "sus_god",    label: "疑神",   color: "bg-purple-500",  text: "text-white",   short: "疑神" },
-  { key: "claim_god",  label: "跳神",   color: "bg-indigo-500",  text: "text-white",   short: "跳神" },
-  { key: "villager",   label: "平民",   color: "bg-stone-400",   text: "text-white",   short: "民" },
-  { key: "wolf_pit",   label: "狼坑",   color: "bg-rose-400",    text: "text-white",   short: "狼坑" },
-  { key: "boom_wolf",  label: "暴狼",   color: "bg-red-900",     text: "text-white",   short: "暴狼" },
+  // 角色标记
+  { key: "wolf",        label: "狼人",     color: "bg-red-600",     text: "text-white",  short: "狼人" },
+  { key: "white_wolf",  label: "白狼王",   color: "bg-red-800",     text: "text-white",  short: "白狼王" },
+  { key: "seer",        label: "预言家",   color: "bg-indigo-500",  text: "text-white",  short: "预言家" },
+  { key: "witch",       label: "女巫",     color: "bg-emerald-600", text: "text-white",  short: "女巫" },
+  { key: "hunter",      label: "猎人",     color: "bg-orange-500",  text: "text-white",  short: "猎人" },
+  { key: "guard",       label: "守卫",     color: "bg-sky-500",     text: "text-white",  short: "守卫" },
+  { key: "magician",    label: "奇迹商人", color: "bg-purple-500",  text: "text-white",  short: "商人" },
+  { key: "villager",    label: "平民",     color: "bg-stone-400",   text: "text-white",  short: "平民" },
+  // 状态标记
+  { key: "gold",        label: "金水",     color: "bg-amber-500",   text: "text-white",  short: "金水" },
+  { key: "silver",      label: "银水",     color: "bg-cyan-400",    text: "text-white",  short: "银水" },
+  { key: "good",        label: "好人",     color: "bg-green-500",   text: "text-white",  short: "好人" },
 ];
 
-export function getMarkDef(key: PlayerMark): MarkMeta | undefined {
-  return MARK_DEFS.find((m) => m.key === key);
+const CUSTOM_PREFIX = "custom:";
+
+export function isCustomMark(mark: string): boolean {
+  return mark.startsWith(CUSTOM_PREFIX);
+}
+
+export function getCustomText(mark: string): string {
+  return mark.slice(CUSTOM_PREFIX.length);
+}
+
+export function makeCustomMark(text: string): string {
+  return CUSTOM_PREFIX + text;
+}
+
+/** 获取标记的显示信息(预设或自定义) */
+export function getMarkDef(key: string): MarkMeta {
+  if (isCustomMark(key)) {
+    const text = getCustomText(key);
+    return {
+      key,
+      label: text,
+      color: "bg-pink-500",
+      text: "text-white",
+      short: text.length > 4 ? text.slice(0, 4) : text,
+    };
+  }
+  return MARK_DEFS.find((m) => m.key === key) || {
+    key,
+    label: key,
+    color: "bg-stone-500",
+    text: "text-white",
+    short: key,
+  };
 }
 
 /** 标记存储: gameId -> { seat -> mark } */
-type GameMarks = Record<number, Record<number, PlayerMark>>;
+type GameMarks = Record<string, Record<number, string>>;
 
 const marksAtom = atomWithStorage<GameMarks>("wolfcha.player_marks", {});
 
@@ -62,26 +98,14 @@ export function usePlayerMarks(gameId: string) {
 
   const marks = allMarks[gameId] || {};
 
-  const getMark = useCallback((seat: number): PlayerMark | undefined => {
+  const getMark = useCallback((seat: number): string | undefined => {
     return marks[seat];
   }, [marks]);
 
-  const setMark = useCallback((seat: number, mark: PlayerMark | undefined) => {
+  const setMark = useCallback((seat: number, mark: string | undefined) => {
     setAllMarks((prev) => {
       const gameMarks = { ...(prev[gameId] || {}) };
-      if (mark === undefined) {
-        delete gameMarks[seat];
-      } else {
-        gameMarks[seat] = mark;
-      }
-      return { ...prev, [gameId]: gameMarks };
-    });
-  }, [gameId, setAllMarks]);
-
-  const toggleMark = useCallback((seat: number, mark: PlayerMark) => {
-    setAllMarks((prev) => {
-      const gameMarks = { ...(prev[gameId] || {}) };
-      if (gameMarks[seat] === mark) {
+      if (mark === undefined || mark === "") {
         delete gameMarks[seat];
       } else {
         gameMarks[seat] = mark;
@@ -98,5 +122,5 @@ export function usePlayerMarks(gameId: string) {
     });
   }, [gameId, setAllMarks]);
 
-  return { marks, getMark, setMark, toggleMark, clearAll };
+  return { marks, getMark, setMark, clearAll };
 }

@@ -8,7 +8,7 @@ import { isWolfRole } from "@/types/game";
 import { cn } from "@/lib/utils";
 import { buildSimpleAvatarUrl, getModelLogoUrl } from "@/lib/avatar-config";
 import { useTranslations } from "next-intl";
-import { getMarkDef, type PlayerMark } from "@/lib/player-marks";
+import { getMarkDef } from "@/lib/player-marks";
 
 interface PlayerCardCompactProps {
   player: Player;
@@ -30,7 +30,7 @@ interface PlayerCardCompactProps {
   isBadgeCandidate?: boolean;
   variant?: "default" | "mobile";
   isInSelectionPhase?: boolean;
-  mark?: PlayerMark;
+  mark?: string;
   onMarkClick?: () => void;
 }
 
