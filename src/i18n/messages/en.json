@@ -21,7 +21,8 @@
     "witch": "Witch",
     "hunter": "Hunter",
     "guard": "Guard",
-    "idiot": "Idiot"
+    "idiot": "Idiot",
+    "magician": "Magician"
   },
   "alignment": {
     "village": "Villagers",
@@ -409,30 +410,25 @@
       "hardDesc": "Deep confrontation, more complex reasoning"
     },
     "playerCount": {
-      "8": {
-        "title": "8 players",
-        "description": "3 wolves, 3 gods, 2 villagers",
-        "roles": "Gods: Seer, Witch, Hunter"
-      },
       "9": {
         "title": "9 players",
-        "description": "3 wolves, 3 gods, 3 villagers",
+        "description": "Wolf King+2 wolves 3 villagers 3 gods",
         "roles": "Gods: Seer, Witch, Hunter"
       },
       "10": {
         "title": "10 players",
-        "description": "2 wolves + WWK, 4 gods, 3 villagers",
-        "roles": "Gods: Seer, Witch, Hunter, Guard"
-      },
-      "11": {
-        "title": "11 players",
-        "description": "3 wolves + WWK, 5 gods, 2 villagers",
-        "roles": "Gods: Seer, Witch, Hunter, Guard, Idiot"
+        "description": "White Wolf King+2 wolves 4 villagers 3 gods",
+        "roles": "Gods: Magician, Seer, Witch"
       },
       "12": {
         "title": "12 players",
-        "description": "3 wolves + WWK, 5 gods, 3 villagers",
-        "roles": "Gods: Seer, Witch, Hunter, Guard, Idiot"
+        "description": "Wolf King+3 wolves 4 villagers 4 gods",
+        "roles": "Gods: Seer, Witch, Hunter, Guard"
+      },
+      "6": {
+        "title": "6 players",
+        "description": "2 wolves 2 villagers 2 gods",
+        "roles": "Gods: Seer, Witch"
       }
     },
     "genshinMode": {
@@ -456,7 +452,8 @@
         "witch": "Has one healing potion and one poison potion",
         "hunter": "Can shoot and eliminate a player upon death",
         "guard": "Protect one player from wolf attacks each night",
-        "idiot": "Survives a vote-out by revealing role, but loses voting rights"
+        "idiot": "Survives a vote-out by revealing role, but loses voting rights",
+        "magician": "Magician: auto-heals a good player at night (once per game)"
       }
     }
   },

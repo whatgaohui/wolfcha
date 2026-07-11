@@ -17,13 +17,12 @@ import type { Role } from "@/types/game";
 /** Return the unique roles present in the default configuration for a given player count. */
 function getAvailableRoles(playerCount: number): Role[] {
   const configs: Record<number, Role[]> = {
-    8: ["Werewolf", "Seer", "Witch", "Hunter", "Villager"],
-    9: ["Werewolf", "Seer", "Witch", "Hunter", "Villager"],
-    10: ["Werewolf", "WhiteWolfKing", "Seer", "Witch", "Hunter", "Guard", "Villager"],
-    11: ["Werewolf", "WhiteWolfKing", "Seer", "Witch", "Hunter", "Guard", "Idiot", "Villager"],
-    12: ["Werewolf", "WhiteWolfKing", "Seer", "Witch", "Hunter", "Guard", "Idiot", "Villager"],
+    6: ["Werewolf", "Seer", "Witch", "Villager"],
+    9: ["Werewolf", "WhiteWolfKing", "Seer", "Witch", "Hunter", "Villager"],
+    10: ["Werewolf", "WhiteWolfKing", "Magician", "Seer", "Witch", "Villager"],
+    12: ["Werewolf", "WhiteWolfKing", "Seer", "Witch", "Hunter", "Guard", "Villager"],
   };
-  return configs[playerCount] ?? configs[10];
+  return configs[playerCount] ?? configs[9];
 }
 
 interface GameSetupModalProps {
@@ -71,10 +70,9 @@ export function GameSetupModal({
   const t = useTranslations();
 
   const PLAYER_COUNT_OPTIONS = [
-    { value: 8, label: t("gameSetup.playerCount.8.title"), description: t("gameSetup.playerCount.8.description"), roles: t("gameSetup.playerCount.8.roles") },
+    { value: 6, label: t("gameSetup.playerCount.6.title"), description: t("gameSetup.playerCount.6.description"), roles: t("gameSetup.playerCount.6.roles") },
     { value: 9, label: t("gameSetup.playerCount.9.title"), description: t("gameSetup.playerCount.9.description"), roles: t("gameSetup.playerCount.9.roles") },
     { value: 10, label: t("gameSetup.playerCount.10.title"), description: t("gameSetup.playerCount.10.description"), roles: t("gameSetup.playerCount.10.roles") },
-    { value: 11, label: t("gameSetup.playerCount.11.title"), description: t("gameSetup.playerCount.11.description"), roles: t("gameSetup.playerCount.11.roles") },
     { value: 12, label: t("gameSetup.playerCount.12.title"), description: t("gameSetup.playerCount.12.description"), roles: t("gameSetup.playerCount.12.roles") },
   ];
 
@@ -88,6 +86,7 @@ export function GameSetupModal({
       Hunter: t("roles.hunter"),
       Guard: t("roles.guard"),
       Idiot: t("roles.idiot"),
+      Magician: t("roles.magician"),
     }),
     [t]
   );
@@ -102,6 +101,7 @@ export function GameSetupModal({
       Hunter: t("gameSetup.rolePreference.desc.hunter"),
       Guard: t("gameSetup.rolePreference.desc.guard"),
       Idiot: t("gameSetup.rolePreference.desc.idiot"),
+      Magician: t("gameSetup.rolePreference.desc.magician"),
     }),
     [t]
   );

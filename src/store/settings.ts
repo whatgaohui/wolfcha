@@ -51,13 +51,23 @@ export const audioSettingsAtom = atom(
   }
 );
 
-const DEFAULT_PLAYER_COUNT = 10;
-const MIN_PLAYER_COUNT = 8;
+const DEFAULT_PLAYER_COUNT = 9;
+const MIN_PLAYER_COUNT = 6;
 const MAX_PLAYER_COUNT = 12;
+
+const ALLOWED_PLAYER_COUNTS = [6, 9, 10, 12];
 
 const normalizePlayerCount = (value: number) => {
   if (!Number.isFinite(value)) return DEFAULT_PLAYER_COUNT;
-  return Math.min(MAX_PLAYER_COUNT, Math.max(MIN_PLAYER_COUNT, Math.round(value)));
+  const rounded = Math.round(value);
+  // 只允许 6/9/10/12;其他值就近匹配到允许的配置
+  if (ALLOWED_PLAYER_COUNTS.includes(rounded)) return rounded;
+  const clamped = Math.min(MAX_PLAYER_COUNT, Math.max(MIN_PLAYER_COUNT, rounded));
+  // 找最近的允许值
+  const nearest = ALLOWED_PLAYER_COUNTS.reduce((best, c) =>
+    Math.abs(c - clamped) < Math.abs(best - clamped) ? c : best
+  );
+  return nearest;
 };
 
 const rawPlayerCountAtom = atomWithStorage<number>("wolfcha.settings.player_count", DEFAULT_PLAYER_COUNT);

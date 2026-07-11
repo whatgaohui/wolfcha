@@ -39,13 +39,12 @@ export const DELAY_CONFIG = {
 
 /** 角色配置 */
 export const ROLE_CONFIG = {
-  /** 10人局角色配置 */
+  /** 9人局角色配置(默认) */
   STANDARD_ROLES: [
-    "Werewolf", "Werewolf", "WhiteWolfKing",
+    "WhiteWolfKing", "Werewolf", "Werewolf",
     "Seer",
     "Witch",
     "Hunter",
-    "Guard",
     "Villager", "Villager", "Villager",
   ] as const,
 } as const;
@@ -95,6 +94,8 @@ export function getRoleName(role: string): string {
       return t("roles.guard");
     case "Idiot":
       return t("roles.idiot");
+    case "Magician":
+      return t("roles.magician");
     default:
       return t("roles.villager");
   }

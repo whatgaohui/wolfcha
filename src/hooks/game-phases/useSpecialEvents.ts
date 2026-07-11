@@ -3,6 +3,7 @@
 import { useCallback } from "react";
 import { useAtom } from "jotai";
 import type { GameState, Player, Alignment } from "@/types/game";
+import { isWolfRole } from "@/types/game";
 import { gameStateAtom } from "@/store/game-machine";
 import {
   transitionPhase,
@@ -199,10 +200,24 @@ export function useSpecialEvents(
       }
     };
 
+    // 奇迹商人自动救人(简化版):如果场上有存活的奇迹商人且解药未用,
+    // 且狼杀目标不是狼人(即好人),则自动给药救该人。
+    let magicianSaved = false;
+    if (wolfTarget !== undefined && !currentState.roleAbilities.magicianHealUsed) {
+      const magician = currentState.players.find((p) => p.role === "Magician" && p.alive);
+      const victim = currentState.players.find((p) => p.seat === wolfTarget);
+      if (magician && victim && !isWolfRole(victim.role)) {
+        // 奇迹商人解药救人(独立于女巫,不触发牛奶规则)
+        currentState.nightActions.magicianHealTarget = wolfTarget;
+        currentState.roleAbilities.magicianHealUsed = true;
+        magicianSaved = true;
+      }
+    }
+
     // 狼人击杀判定
     if (wolfTarget !== undefined) {
       const isProtected = guardTarget === wolfTarget;
-      const isSaved = witchSave === true;
+      const isSaved = witchSave === true || magicianSaved;
 
       // If both guard and witch save are applied, the victim still dies (milk/guard overlap).
       if ((isProtected && isSaved) || (!isProtected && !isSaved)) {

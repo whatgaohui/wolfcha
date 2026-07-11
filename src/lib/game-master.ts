@@ -179,6 +179,7 @@ export function createInitialGameState(): GameState {
       hunterCanShoot: true,
       idiotRevealed: false,
       whiteWolfKingBoomUsed: false,
+      magicianHealUsed: false,
     },
     winner: null,
   };
@@ -186,50 +187,41 @@ export function createInitialGameState(): GameState {
 
 export function getRoleConfiguration(playerCount: number): Role[] {
   const configs: Record<number, Role[]> = {
-    8: ["Werewolf", "Werewolf", "Werewolf", "Seer", "Witch", "Hunter", "Villager", "Villager"],
-    9: ["Werewolf", "Werewolf", "Werewolf", "Seer", "Witch", "Hunter", "Villager", "Villager", "Villager"],
+    // 6人局: 2狼 + 2民 + 1女巫 + 1预言家
+    6: ["Werewolf", "Werewolf", "Witch", "Seer", "Villager", "Villager"],
+    // 9人局: 1狼王 + 2小狼 + 预言家 + 女巫 + 猎人 + 3民
+    9: ["WhiteWolfKing", "Werewolf", "Werewolf", "Seer", "Witch", "Hunter", "Villager", "Villager", "Villager"],
+    // 10人局: 奇迹商人 + 预言家 + 女巫 + 1白狼王 + 2小狼 + 4民
     10: [
-      "Werewolf",
-      "Werewolf",
       "WhiteWolfKing",
+      "Werewolf",
+      "Werewolf",
+      "Magician",
       "Seer",
       "Witch",
-      "Hunter",
-      "Guard",
+      "Villager",
       "Villager",
       "Villager",
       "Villager",
     ],
-    11: [
-      "Werewolf",
-      "Werewolf",
-      "Werewolf",
-      "WhiteWolfKing",
-      "Seer",
-      "Witch",
-      "Hunter",
-      "Guard",
-      "Idiot",
-      "Villager",
-      "Villager",
-    ],
+    // 12人局: 1狼王 + 3小狼 + 4民 + 预言家 + 女巫 + 猎人 + 守卫
     12: [
-      "Werewolf",
-      "Werewolf",
-      "Werewolf",
       "WhiteWolfKing",
+      "Werewolf",
+      "Werewolf",
+      "Werewolf",
       "Seer",
       "Witch",
       "Hunter",
       "Guard",
-      "Idiot",
+      "Villager",
       "Villager",
       "Villager",
       "Villager",
     ],
   };
 
-  const roles = configs[playerCount] ?? configs[10];
+  const roles = configs[playerCount] ?? configs[9];
   return roles.slice();
 }
 

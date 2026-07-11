@@ -1,4 +1,4 @@
-export type Role = "Villager" | "Werewolf" | "Seer" | "Witch" | "Hunter" | "Guard" | "Idiot" | "WhiteWolfKing";
+export type Role = "Villager" | "Werewolf" | "Seer" | "Witch" | "Hunter" | "Guard" | "Idiot" | "WhiteWolfKing" | "Magician";
 
 /** Check if a role belongs to the wolf team (used for seer checks, wolf actions, etc.) */
 export function isWolfRole(role: string | undefined): boolean {
@@ -229,6 +229,7 @@ export interface GameState {
     seerHistory?: Array<{ targetSeat: number; isWolf: boolean; day: number }>; // 查验历史
     pendingWolfVictim?: number;  // 待公布的狼人击杀目标（警长竞选后公布）
     pendingPoisonVictim?: number; // 待公布的女巫毒杀目标（警长竞选后公布）
+    magicianHealTarget?: number; // 奇迹商人给药目标（简化版:自动给好人）
   };
   // 角色能力使用记录
   roleAbilities: {
@@ -237,6 +238,7 @@ export interface GameState {
     hunterCanShoot: boolean;     // 猎人是否能开枪（被毒死不能开枪）
     idiotRevealed: boolean;      // 白痴是否已翻牌（翻牌后失去投票权但不死）
     whiteWolfKingBoomUsed: boolean; // 白狼王是否已自爆
+    magicianHealUsed: boolean;   // 奇迹商人解药是否已用
   };
   winner: Alignment | null;
 }

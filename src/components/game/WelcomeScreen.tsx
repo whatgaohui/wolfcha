@@ -44,14 +44,13 @@ interface WelcomeScreenProps {
   onAutoAdvanceDialogueEnabledChange: (value: boolean) => void;
 }
 
-const PLAYER_COUNT_OPTIONS = [8, 9, 10, 11, 12];
+const PLAYER_COUNT_OPTIONS = [6, 9, 10, 12];
 
 const PLAYER_COUNT_CONFIG: Record<number, string> = {
-  8: "3狼 · 3神 · 2民",
-  9: "3狼 · 3神 · 3民",
-  10: "2狼+白狼王 · 4神 · 3民",
-  11: "3狼+白狼王 · 5神 · 2民",
-  12: "3狼+白狼王 · 5神 · 3民",
+  6: "2狼 · 2民 · 女巫 · 预言家",
+  9: "狼王+2狼 · 预言家 · 女巫 · 猎人 · 3民",
+  10: "白狼王+2狼 · 商人 · 预言家 · 女巫 · 4民",
+  12: "狼王+3狼 · 4民 · 预言家 · 女巫 · 猎人 · 守卫",
 };
 
 const DIFFICULTY_OPTIONS: { value: DifficultyLevel; descKey: string }[] = [
@@ -183,7 +182,7 @@ export function WelcomeScreen({
             <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-stone-400">
               {t("gameSetup.playerCountLabel")}
             </label>
-            <div className="grid grid-cols-5 gap-2">
+            <div className="grid grid-cols-4 gap-2">
               {PLAYER_COUNT_OPTIONS.map((count) => {
                 const active = playerCount === count;
                 return (

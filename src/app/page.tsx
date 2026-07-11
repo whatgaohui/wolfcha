@@ -95,6 +95,7 @@ const getRoleLabel = (role?: Role | null) => {
     case "Hunter": return t("roles.hunter");
     case "Guard": return t("roles.guard");
     case "Idiot": return t("roles.idiot");
+    case "Magician": return t("roles.magician");
     case "WhiteWolfKing": return t("roles.whiteWolfKing");
     case "Villager": return t("roles.villager");
     default: return "?";
